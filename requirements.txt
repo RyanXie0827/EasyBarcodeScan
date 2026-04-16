@@ -1,0 +1,6 @@
+curl_cffi>=0.7.0
+keyboard>=0.13.5
+numpy>=1.24.0
+Pillow>=10.0.0
+pyzbar>=0.1.9
+pyinstaller>=6.0.0

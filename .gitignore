@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+*.spec.bak
+
+# Runtime data
+config.json
+history.csv
+logs/
+_tmp/
+
+# IDE
+.idea/
+.vscode/
+
