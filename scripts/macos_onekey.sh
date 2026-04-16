@@ -3,10 +3,11 @@ set -euo pipefail
 
 MODE="${1:-run}" # run | build
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-VENV_DIR="${VENV_DIR:-.venv_mac}"
 APP_NAME="EasyBarcodeScan"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv_mac}"
+PYINSTALLER_CACHE_DIR="${PYINSTALLER_CONFIG_DIR:-$ROOT_DIR/.pyinstaller}"
 cd "$ROOT_DIR"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -31,6 +32,23 @@ if ! brew list --versions zbar >/dev/null 2>&1; then
   brew install zbar
 fi
 
+HOMEBREW_PREFIX="$(brew --prefix)"
+ZBAR_PREFIX="$(brew --prefix zbar)"
+LIB_PATHS=()
+if [[ -d "${ZBAR_PREFIX}/lib" ]]; then
+  LIB_PATHS+=("${ZBAR_PREFIX}/lib")
+fi
+if [[ -d "${HOMEBREW_PREFIX}/lib" ]]; then
+  LIB_PATHS+=("${HOMEBREW_PREFIX}/lib")
+fi
+if [[ -n "${DYLD_LIBRARY_PATH:-}" ]]; then
+  LIB_PATHS+=("${DYLD_LIBRARY_PATH}")
+fi
+if [[ ${#LIB_PATHS[@]} -gt 0 ]]; then
+  export DYLD_LIBRARY_PATH="$(IFS=:; echo "${LIB_PATHS[*]}")"
+  export DYLD_FALLBACK_LIBRARY_PATH="$DYLD_LIBRARY_PATH"
+fi
+
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "🐍 Creating virtual env: $VENV_DIR"
   "$PYTHON_BIN" -m venv "$VENV_DIR"
@@ -40,26 +58,28 @@ fi
 source "$VENV_DIR/bin/activate"
 
 echo "📦 Installing Python dependencies ..."
-python -m pip install --upgrade pip
+export PIP_DISABLE_PIP_VERSION_CHECK=1
 python -m pip install -r requirements.txt
+export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYINSTALLER_CONFIG_DIR="$PYINSTALLER_CACHE_DIR"
+mkdir -p "$PYINSTALLER_CONFIG_DIR"
 
 case "$MODE" in
   run)
     echo "🚀 Starting ${APP_NAME} ..."
-    python gds_scan_v2.py
+    python -m easybarcodescan
     ;;
   build)
     echo "🧹 Cleaning old build artifacts ..."
     rm -rf build dist
     echo "🏗️ Building macOS app ..."
-    python -m PyInstaller --noconfirm --clean easybarcodescan.spec
+    python -m PyInstaller --noconfirm --clean packaging/pyinstaller/easybarcodescan.spec
     echo "✅ Done: dist/${APP_NAME}.app"
     ;;
   *)
-    echo "Usage: bash macos_onekey.sh [run|build]"
+    echo "Usage: bash scripts/macos_onekey.sh [run|build]"
     echo "  run   Install deps and run app (default)"
     echo "  build Install deps and build .app package"
     exit 2
     ;;
 esac
-

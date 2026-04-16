@@ -4,38 +4,67 @@
 
 ```bash
 git clone <your-repo-url>
-cd easybarcodescan_repo
+cd EasyBarcodeScan
 ```
 
 ## 2) One-command run
 
 ```bash
-bash macos_onekey.sh
+bash scripts/macos_onekey.sh
 ```
 
 This will:
-- install `zbar` via Homebrew (if missing)
+
+- install `zbar` via Homebrew if missing
 - create `.venv_mac`
-- install Python dependencies
-- run `gds_scan_v2.py`
+- install Python dependencies, including `pyobjc-framework-Quartz`
+- run `python -m easybarcodescan`
 
 ## 3) Build `.app`
 
 ```bash
-bash macos_onekey.sh build
+bash scripts/macos_onekey.sh build
 ```
 
 Output:
+
 - `dist/EasyBarcodeScan.app`
 
-## 4) Config and login cache path
+## 4) Build `.dmg`
+
+```bash
+bash scripts/build_macos_dmg.sh
+```
+
+Output:
+
+- `dist/EasyBarcodeScan.dmg`
+
+## 5) Config path
 
 When packaged as `.app`, config is stored in:
 
 - `~/Library/Application Support/EasyBarcodeScan/config.json`
 
-## 5) First-run permissions on macOS
+Development config template is:
 
-For screenshot and hotkey features, grant app permissions in:
-- Privacy & Security → Screen Recording
-- Privacy & Security → Input Monitoring
+- `config/config.example.json`
+
+## 6) First-run permissions on macOS
+
+For screenshot and hotkey features, open System Settings → Privacy & Security and grant:
+
+- Screen Recording
+- Input Monitoring
+- Accessibility
+
+Permission target:
+
+- If you start from Terminal, iTerm, VS Code, or PyCharm, allow that launcher
+- If you run the packaged app, allow `EasyBarcodeScan.app`
+
+Quit and reopen EasyBarcodeScan after changing permissions.
+
+Default hotkey on macOS:
+
+- `Ctrl + Shift + A`

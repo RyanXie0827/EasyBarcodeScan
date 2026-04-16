@@ -7,16 +7,21 @@ __pycache__/
 
 # Virtual env
 .venv/
+.venv_mac/
+.venv_win/
 venv/
 env/
+.pyinstaller/
 
 # Build outputs
 build/
 dist/
+release_dmg/
 *.spec.bak
 
 # Runtime data
 config.json
+config/config.json
 history.csv
 logs/
 _tmp/
@@ -24,4 +29,3 @@ _tmp/
 # IDE
 .idea/
 .vscode/
-

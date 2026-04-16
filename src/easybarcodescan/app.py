@@ -7,7 +7,10 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 import threading
+import time
+import traceback
 import urllib.parse
 from ctypes import wintypes
 from dataclasses import asdict, dataclass
@@ -15,12 +18,87 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
-import keyboard
 import tkinter as tk
 from curl_cffi import requests
+from .global_hotkey import HotkeyError, HotkeyPermissionError, add_hotkey, get_default_hotkey, get_hotkey_example, remove_hotkey
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageGrab, ImageOps, ImageTk
+from .zbar_compat import prepare_zbar_environment
+
+prepare_zbar_environment()
+
 from pyzbar.pyzbar import decode
 from tkinter import messagebox, simpledialog, ttk
+
+
+_DIALOG_PARENT = None
+_MESSAGEBOX_SHOWINFO = messagebox.showinfo
+_MESSAGEBOX_SHOWWARNING = messagebox.showwarning
+_MESSAGEBOX_SHOWERROR = messagebox.showerror
+_MESSAGEBOX_ASKYESNO = messagebox.askyesno
+
+
+def set_dialog_parent(parent) -> None:
+    global _DIALOG_PARENT
+    _DIALOG_PARENT = parent
+
+
+def get_dialog_parent():
+    root = _DIALOG_PARENT
+    if root is None:
+        return None
+    try:
+        if not root.winfo_exists():
+            return None
+        focused_widget = root.focus_get()
+        if focused_widget is not None:
+            focused_window = focused_widget.winfo_toplevel()
+            if focused_window and focused_window.winfo_exists():
+                return focused_window
+    except Exception:
+        pass
+    return root
+
+
+def prepare_dialog_options(options: dict) -> dict:
+    if "parent" not in options or options.get("parent") is None:
+        parent = get_dialog_parent()
+        if parent is not None:
+            options["parent"] = parent
+
+    parent = options.get("parent")
+    if parent is not None:
+        try:
+            parent.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            parent.lift()
+            parent.focus_force()
+        except Exception:
+            pass
+    return options
+
+
+def show_info_dialog(title=None, message=None, **options):
+    return _MESSAGEBOX_SHOWINFO(title, message, **prepare_dialog_options(options))
+
+
+def show_warning_dialog(title=None, message=None, **options):
+    return _MESSAGEBOX_SHOWWARNING(title, message, **prepare_dialog_options(options))
+
+
+def show_error_dialog(title=None, message=None, **options):
+    return _MESSAGEBOX_SHOWERROR(title, message, **prepare_dialog_options(options))
+
+
+def ask_yes_no_dialog(title=None, message=None, **options):
+    return _MESSAGEBOX_ASKYESNO(title, message, **prepare_dialog_options(options))
+
+
+messagebox.showinfo = show_info_dialog
+messagebox.showwarning = show_warning_dialog
+messagebox.showerror = show_error_dialog
+messagebox.askyesno = ask_yes_no_dialog
 
 
 if platform.system() == "Windows":
@@ -34,6 +112,7 @@ if platform.system() == "Windows":
 
 
 APP_NAME = "EasyBarcodeScan"
+APP_VERSION = "1.0.2"
 API_URL = "https://bff.gds.org.cn/gds/searching-api/ProductService/ProductListByGTIN"
 MAX_HISTORY_ITEMS = 200
 TOKEN_EXPIRY_SKEW_SECONDS = 30
@@ -41,6 +120,18 @@ PASSWORD_KEYCHAIN_SERVICE = f"{APP_NAME}.credential"
 OSS_BASE_URL = "https://oss.gds.org.cn"
 IS_PACKAGED_APP = bool(getattr(sys, "frozen", False))
 ENABLE_CONSOLE_DEBUG = not IS_PACKAGED_APP
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MACOS_SCREEN_CAPTURE_BIN = "/usr/sbin/screencapture"
+MACOS_SETUP_NOTICE = (
+    "macOS 首次使用前请先开启系统权限：\n"
+    "1. 打开“系统设置 → 隐私与安全性 → 屏幕录制”，允许当前启动器或 EasyBarcodeScan.app。\n"
+    "2. 打开“系统设置 → 隐私与安全性 → 输入监控”，允许当前启动器或 EasyBarcodeScan.app。\n"
+    "3. 打开“系统设置 → 隐私与安全性 → 辅助功能”，允许当前启动器或 EasyBarcodeScan.app。\n"
+    "4. 如果是从 Terminal、iTerm、VS Code 或 PyCharm 启动，请授权对应启动器；如果是打包后的 .app，请授权 EasyBarcodeScan.app。\n"
+    "5. 授权后请完全退出并重新打开本程序。\n\n"
+    "macOS 默认快捷键：Control + Shift + A。\n"
+    "如果你此前使用过 Command + Shift + A，部分终端/IDE 可能会优先拦截它。"
+)
 
 
 def get_app_data_dir() -> Path:
@@ -56,7 +147,7 @@ def get_app_data_dir() -> Path:
 def get_config_file_path() -> Path:
     if IS_PACKAGED_APP:
         return get_app_data_dir() / "config.json"
-    return Path(__file__).resolve().parent / "config.json"
+    return PROJECT_ROOT / "config" / "config.json"
 
 
 def get_legacy_config_candidates(config_file_path: Path) -> list[Path]:
@@ -64,8 +155,12 @@ def get_legacy_config_candidates(config_file_path: Path) -> list[Path]:
     if IS_PACKAGED_APP:
         candidates.append(Path.cwd() / "config.json")
         candidates.append(Path(sys.executable).resolve().parent / "config.json")
+        candidates.append(Path.cwd() / "config" / "config.json")
     else:
         candidates.append(Path.cwd() / "config.json")
+        candidates.append(Path.cwd() / "config" / "config.json")
+        candidates.append(PROJECT_ROOT / "config.json")
+        candidates.append(Path(__file__).resolve().parent / "config.json")
     unique_paths = []
     seen = set()
     for path in candidates:
@@ -204,19 +299,23 @@ class HistoryRecord:
 class BarcodeScannerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
+        set_dialog_parent(self.root)
         self.root.title(APP_NAME)
-        self.root.attributes("-topmost", True)
+        if platform.system() != "Darwin":
+            self.root.attributes("-topmost", True)
         self.root.configure(bg="#ebf2ff")
+        self.root.report_callback_exception = self.handle_tk_callback_exception
 
         self.style = ttk.Style()
         self.setup_styles()
+        self.disable_primary_selection_bindings()
         self.center_window(self.root, 660, 500)
         min_root_w, min_root_h = self.scale_window_size(self.root, 620, 460)
         self.root.minsize(min_root_w, min_root_h)
 
         self.config_file_path = get_config_file_path()
         self.config = self.load_config()
-        self.current_hotkey = self.config.get("hotkey", "ctrl+alt+a")
+        self.current_hotkey = self.get_initial_hotkey()
         self.token = self.config.get("token", "")
         self.remember_password = bool(self.config.get("remember_password", False))
         self.saved_username = str(self.config.get("saved_username", ""))
@@ -233,6 +332,9 @@ class BarcodeScannerApp:
 
         self.is_snipping = False
         self.hotkey_handler = None
+        self.hotkey_status_message = ""
+        self.macos_setup_notice_scheduled = False
+        self.local_hotkey_sequences: list[str] = []
         self.login_session = None
         self.auth_env = {}
         self.pending_login_username = ""
@@ -240,6 +342,8 @@ class BarcodeScannerApp:
         self.pending_remember_password = False
 
         self.is_querying = False
+        self.scan_session_counter = 0
+        self.active_scan_session_id: int | None = None
         self.query_total = 0
         self.query_done = 0
 
@@ -263,7 +367,9 @@ class BarcodeScannerApp:
         self.image_preview_state = {}
 
         self.build_home_ui()
-        self.bind_hotkey()
+        self.register_application_shortcuts()
+        self.update_local_hotkey_binding()
+        self.bind_hotkey_async()
         self.update_status_labels()
         self.check_trigger()
         if self.token_expired_on_startup:
@@ -271,7 +377,21 @@ class BarcodeScannerApp:
             self.last_summary_var.set("最近一次扫描：登录已过期，请重新登录")
             self.root.after(200, lambda: messagebox.showwarning("登录状态", "检测到登录已过期，请重新登录。"))
 
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_main_window)
+
+    def get_initial_hotkey(self) -> str:
+        configured_hotkey = str(self.config.get("hotkey", "") or "").strip().lower()
+        default_hotkey = get_default_hotkey()
+        if platform.system() == "Darwin" and configured_hotkey in (
+            "",
+            "ctrl+alt+a",
+            "ctrl + alt + a",
+            "command+shift+a",
+            "command + shift + a",
+        ):
+            self.config["hotkey"] = default_hotkey
+            return default_hotkey
+        return configured_hotkey or default_hotkey
 
     def setup_styles(self) -> None:
         preferred_theme = "vista" if "vista" in self.style.theme_names() else "clam"
@@ -285,6 +405,176 @@ class BarcodeScannerApp:
         self.style.configure("Login.TCheckbutton", font=("微软雅黑", 9))
         self.style.configure("History.Treeview", rowheight=26, font=("微软雅黑", 10))
         self.style.configure("History.Treeview.Heading", font=("微软雅黑", 10, "bold"))
+
+    def register_application_shortcuts(self) -> None:
+        if platform.system() == "Darwin":
+            try:
+                self.root.createcommand("tk::mac::ReopenApplication", self.show_main_window)
+            except Exception:
+                pass
+            try:
+                self.root.bind_all("<Command-q>", lambda _event: self.quit_application())
+            except Exception:
+                pass
+            return
+
+        try:
+            self.root.bind_all("<Control-q>", lambda _event: self.quit_application())
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_quit_shortcut_text() -> str:
+        if platform.system() == "Darwin":
+            return "Command + Q"
+        return "Ctrl + Q"
+
+    def update_local_hotkey_binding(self) -> None:
+        if platform.system() != "Darwin":
+            return
+
+        target_widgets = self.get_local_hotkey_target_widgets()
+        for sequence in self.local_hotkey_sequences:
+            for widget in target_widgets:
+                try:
+                    widget.unbind(sequence)
+                except Exception:
+                    pass
+        self.local_hotkey_sequences = []
+
+        sequences = self.get_tk_hotkey_sequences(self.current_hotkey)
+        if not sequences:
+            return
+
+        for sequence in sequences:
+            for widget in target_widgets:
+                try:
+                    widget.bind(sequence, self.handle_local_hotkey)
+                except Exception:
+                    pass
+        self.local_hotkey_sequences = sequences
+
+    def get_local_hotkey_target_widgets(self) -> list[tk.Misc]:
+        widgets: list[tk.Misc] = []
+        seen_widget_ids: set[str] = set()
+
+        def add_widget(widget) -> None:
+            if widget is None:
+                return
+            try:
+                if not widget.winfo_exists():
+                    return
+                widget_id = str(widget)
+            except Exception:
+                return
+            if widget_id in seen_widget_ids:
+                return
+            seen_widget_ids.add(widget_id)
+            widgets.append(widget)
+
+        add_widget(self.root)
+        for attr_name in (
+            "history_window",
+            "result_window",
+            "image_preview_window",
+            "login_win",
+        ):
+            add_widget(getattr(self, attr_name, None))
+        for attr_name in ("entry_user", "entry_pwd", "entry_cap"):
+            add_widget(getattr(self, attr_name, None))
+        return widgets
+
+    @staticmethod
+    def get_tk_hotkey_sequences(hotkey: str) -> list[str]:
+        raw_tokens = [part.strip().lower() for part in str(hotkey or "").split("+") if part.strip()]
+        if not raw_tokens:
+            return []
+
+        key_token = raw_tokens[-1]
+        modifier_tokens = raw_tokens[:-1]
+        modifier_map = {
+            "cmd": "Command",
+            "command": "Command",
+            "shift": "Shift",
+            "ctrl": "Control",
+            "control": "Control",
+            "alt": "Option",
+            "option": "Option",
+        }
+        modifiers: list[str] = []
+        for token in modifier_tokens:
+            mapped = modifier_map.get(token)
+            if mapped and mapped not in modifiers:
+                modifiers.append(mapped)
+
+        key_variants: list[str] = []
+        if len(key_token) == 1 and key_token.isalpha():
+            key_variants = [key_token.lower(), key_token.upper()]
+        elif len(key_token) == 1 and key_token.isdigit():
+            key_variants = [key_token]
+        elif re.fullmatch(r"f\d{1,2}", key_token):
+            key_variants = [key_token.upper()]
+        else:
+            special_map = {
+                "space": "space",
+                "tab": "Tab",
+                "enter": "Return",
+                "return": "Return",
+                "esc": "Escape",
+                "escape": "Escape",
+                "left": "Left",
+                "right": "Right",
+                "up": "Up",
+                "down": "Down",
+                "delete": "Delete",
+                "backspace": "BackSpace",
+            }
+            mapped_key = special_map.get(key_token)
+            if mapped_key:
+                key_variants = [mapped_key]
+
+        sequences: list[str] = []
+        for key_variant in key_variants:
+            sequences.append("<" + "-".join(modifiers + [key_variant]) + ">")
+        return sequences
+
+    def handle_local_hotkey(self, _event=None):
+        self.trigger_snip()
+        return "break"
+
+    def handle_tk_callback_exception(self, exc_type, exc_value, exc_traceback) -> None:
+        error_text = str(exc_value)
+        if (
+            "PRIMARY selection" in error_text
+            or "selection doesn't exist" in error_text
+            or 'form "STRING" not defined' in error_text
+            or 'format "STRING" not defined' in error_text
+        ):
+            if platform.system() == "Darwin" and hasattr(self, "last_summary_var"):
+                self.last_summary_var.set(
+                    "最近一次扫描：快捷键被当前输入框或启动器接管，请开启“辅助功能”权限，必要时修改快捷键。"
+                )
+            debug_console("忽略 macOS Tk PRIMARY 选择区异常", error_text)
+            return
+
+        try:
+            traceback.print_exception(exc_type, exc_value, exc_traceback)
+        except Exception:
+            pass
+
+    def disable_primary_selection_bindings(self) -> None:
+        if platform.system() != "Darwin":
+            return
+
+        def ignore_primary_selection(_event=None):
+            return "break"
+
+        for widget_class in ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox", "Combobox", "TCombobox"):
+            for sequence in ("<<PasteSelection>>", "<Button-2>", "<ButtonRelease-2>", "<B2-Motion>"):
+                try:
+                    self.root.bind_class(widget_class, sequence, ignore_primary_selection)
+                except Exception:
+                    pass
 
     def build_home_ui(self) -> None:
         main_frame = tk.Frame(self.root, bg="#ebf2ff")
@@ -314,6 +604,25 @@ class BarcodeScannerApp:
         self.token_label = tk.Label(status_card, font=("微软雅黑", 10, "bold"), bg="#ffffff")
         self.token_label.pack(anchor="w", padx=16, pady=(0, 10))
 
+        if platform.system() == "Darwin":
+            macos_card = tk.Frame(main_frame, bg="#fff7ed", bd=1, relief="solid")
+            macos_card.pack(fill="x", pady=(0, 10))
+            tk.Label(
+                macos_card,
+                text="macOS 前置设置：需开启“屏幕录制”和“输入监控”，授权后重启程序。",
+                font=("微软雅黑", 9),
+                bg="#fff7ed",
+                fg="#9a3412",
+                wraplength=588,
+                justify="left",
+            ).pack(side="left", anchor="w", padx=14, pady=8, expand=True, fill="x")
+            ttk.Button(
+                macos_card,
+                text="查看说明",
+                style="Secondary.TButton",
+                command=self.show_macos_setup_notice,
+            ).pack(side="right", padx=(0, 12), pady=8)
+
         result_card = tk.Frame(main_frame, bg="#ffffff", bd=1, relief="solid")
         result_card.pack(fill="x")
         tk.Label(
@@ -340,27 +649,87 @@ class BarcodeScannerApp:
         self.auth_btn.grid(
             row=0, column=0, padx=5, sticky="ew"
         )
-        ttk.Button(btn_frame, text="修改快捷键", style="Secondary.TButton", command=self.change_hotkey).grid(
+        ttk.Button(btn_frame, text="开始截图", style="Secondary.TButton", command=self.manual_start_snip).grid(
             row=0, column=1, padx=5, sticky="ew"
         )
-        ttk.Button(btn_frame, text="历史记录", style="Secondary.TButton", command=self.open_history).grid(
+        ttk.Button(btn_frame, text="修改快捷键", style="Secondary.TButton", command=self.change_hotkey).grid(
             row=0, column=2, padx=5, sticky="ew"
         )
-        ttk.Button(btn_frame, text="清空历史", style="Danger.TButton", command=self.clear_history).grid(
+        ttk.Button(btn_frame, text="历史记录", style="Secondary.TButton", command=self.open_history).grid(
             row=0, column=3, padx=5, sticky="ew"
         )
-        for column_index in range(4):
+        ttk.Button(btn_frame, text="清空历史", style="Danger.TButton", command=self.clear_history).grid(
+            row=0, column=4, padx=5, sticky="ew"
+        )
+        ttk.Button(btn_frame, text="退出程序", style="Danger.TButton", command=self.quit_application).grid(
+            row=0, column=5, padx=5, sticky="ew"
+        )
+        for column_index in range(6):
             btn_frame.grid_columnconfigure(column_index, weight=1)
 
         tk.Label(
             main_frame,
-            text="提示：按快捷键框选条码区域，按 ESC 取消截屏。",
+            text=self.get_scan_tip_text(),
             font=("微软雅黑", 9),
             bg="#ebf2ff",
             fg="#64748b",
         ).pack(anchor="w", pady=(4, 8))
+        tk.Label(
+            main_frame,
+            text=f"点叉号只会隐藏到后台，程序仍可全局监听；如需完全退出，请按 {self.get_quit_shortcut_text()} 或点击“退出程序”。",
+            font=("微软雅黑", 9),
+            bg="#ebf2ff",
+            fg="#64748b",
+            wraplength=588,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+        tk.Label(
+            main_frame,
+            text="by Ryan",
+            font=("微软雅黑", 8),
+            bg="#ebf2ff",
+            fg="#94a3b8",
+        ).pack(anchor="e", pady=(2, 0))
 
         self.root.bind("<Configure>", self.on_home_resize)
+
+    @staticmethod
+    def get_scan_tip_text() -> str:
+        if platform.system() == "Darwin":
+            return "提示：按快捷键后使用 macOS 系统截图框选条码区域，按 ESC 可取消。"
+        return "提示：按快捷键框选条码区域，按 ESC 取消截屏。"
+
+    def show_macos_setup_notice(self) -> None:
+        if platform.system() != "Darwin":
+            return
+        messagebox.showinfo("macOS 使用前设置", MACOS_SETUP_NOTICE)
+
+    def show_macos_setup_notice_if_needed(self) -> None:
+        return
+
+    def hide_main_window(self) -> None:
+        if self.is_snipping:
+            self.last_summary_var.set("最近一次扫描：正在截图中，截图结束后仍会继续后台监听。")
+            return
+        try:
+            self.root.withdraw()
+        except Exception:
+            return
+        self.last_summary_var.set(
+            f"最近一次扫描：主窗口已隐藏到后台，仍可按 {self.current_hotkey.upper()} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
+        )
+
+    def show_main_window(self, *_args) -> None:
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
+            return
+        self.bring_window_front(self.root)
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
 
     def on_home_resize(self, _event=None) -> None:
         if not hasattr(self, "summary_label"):
@@ -373,7 +742,10 @@ class BarcodeScannerApp:
         self.summary_label.config(wraplength=max(220, width - 6))
 
     def update_status_labels(self) -> None:
-        self.hotkey_label.config(text=f"当前快捷键：{self.current_hotkey.upper()}")
+        hotkey_text = f"当前快捷键：{self.current_hotkey.upper()}"
+        if self.hotkey_status_message:
+            hotkey_text = f"{hotkey_text}（{self.hotkey_status_message}）"
+        self.hotkey_label.config(text=hotkey_text)
         if self.token:
             if self.is_token_expired(self.token):
                 self.token_label.config(text="登录状态：已过期（请登录）", fg="#d93025")
@@ -388,6 +760,115 @@ class BarcodeScannerApp:
             else:
                 self.auth_btn.config(text="登录")
 
+    def bring_window_front(self, window, parent=None) -> None:
+        if window is None:
+            return
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+
+        target_parent = parent
+        if target_parent is None and window is not self.root and not self.is_window_hidden(self.root):
+            target_parent = self.root
+
+        try:
+            if target_parent is not None and target_parent is not window:
+                window.transient(target_parent)
+        except Exception:
+            pass
+        try:
+            if str(window.state()) in ("iconic", "withdrawn"):
+                window.deiconify()
+        except Exception:
+            pass
+        try:
+            window.attributes("-topmost", True)
+            if platform.system() == "Darwin":
+                window.after(200, lambda current_window=window: self._set_window_topmost(current_window, False))
+        except Exception:
+            pass
+        try:
+            window.lift()
+            window.focus_force()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _set_window_topmost(window, enabled: bool) -> None:
+        try:
+            if window and window.winfo_exists():
+                window.attributes("-topmost", enabled)
+        except Exception:
+            pass
+
+    @staticmethod
+    def is_window_hidden(window) -> bool:
+        try:
+            return str(window.state()) in ("iconic", "withdrawn")
+        except Exception:
+            return False
+
+    def collect_open_windows_for_capture(self) -> list[tuple[tk.Toplevel, str]]:
+        windows: list[tuple[tk.Toplevel, str]] = []
+        candidates = [
+            self.image_preview_window,
+            self.result_window,
+            self.history_window,
+            getattr(self, "login_win", None),
+            self.root,
+        ]
+        for window in candidates:
+            if window is None:
+                continue
+            try:
+                if not window.winfo_exists():
+                    continue
+                windows.append((window, str(window.state())))
+            except Exception:
+                continue
+        return windows
+
+    def prepare_macos_capture_windows(self) -> list[tuple[tk.Toplevel, str]]:
+        snapshots = self.collect_open_windows_for_capture()
+        for window, _state in snapshots:
+            try:
+                window.attributes("-topmost", False)
+            except Exception:
+                pass
+            try:
+                window.withdraw()
+            except Exception:
+                pass
+        try:
+            self.root.update()
+        except Exception:
+            pass
+        time.sleep(0.18)
+        return snapshots
+
+    def restore_macos_capture_windows(self, snapshots: list[tuple[tk.Toplevel, str]]) -> None:
+        for window, state in reversed(snapshots):
+            try:
+                if not window.winfo_exists():
+                    continue
+            except Exception:
+                continue
+            if state == "withdrawn":
+                continue
+            if state == "iconic":
+                try:
+                    window.iconify()
+                except Exception:
+                    pass
+                continue
+            try:
+                window.deiconify()
+            except Exception:
+                pass
+            self.bring_window_front(window, self.root)
+
     def handle_auth_action(self) -> None:
         if self.token and not self.is_token_expired(self.token):
             self.clear_login_info()
@@ -397,6 +878,12 @@ class BarcodeScannerApp:
             self.mark_token_expired("登录已过期，请重新登录。", notify=False)
 
         self.show_login_window()
+
+    def manual_start_snip(self) -> None:
+        if self.is_querying:
+            messagebox.showwarning("提示", "当前正在查询中，请稍候再截图。")
+            return
+        self.start_snip()
 
     @staticmethod
     def parse_jwt_payload(token: str) -> dict | None:
@@ -720,12 +1207,13 @@ class BarcodeScannerApp:
                 continue
 
         return {
-            "hotkey": "ctrl+alt+a",
+            "hotkey": get_default_hotkey(),
             "token": "",
             "history_records": [],
             "remember_password": False,
             "saved_username": "",
             "saved_password_encrypted": "",
+            "macos_setup_notice_shown": False,
         }
 
     @staticmethod
@@ -765,19 +1253,68 @@ class BarcodeScannerApp:
 
     def bind_hotkey(self) -> None:
         try:
-            new_handler = keyboard.add_hotkey(self.current_hotkey, self.trigger_snip)
-            if self.hotkey_handler is not None:
-                keyboard.remove_hotkey(self.hotkey_handler)
-            self.hotkey_handler = new_handler
-            self.update_status_labels()
-        except Exception as error:
-            messagebox.showerror("快捷键错误", f"绑定快捷键失败，请尝试其他组合。\n{error}")
+            new_handler = add_hotkey(self.current_hotkey, self.trigger_snip)
+            self.on_hotkey_bound(new_handler)
+        except HotkeyError as error:
+            self.on_hotkey_bind_failed(error)
+
+    def bind_hotkey_async(self) -> None:
+        self.hotkey_status_message = "启动中"
+        self.update_status_labels()
+
+        def worker() -> None:
+            def schedule_ui(callback) -> None:
+                try:
+                    self.root.after(0, callback)
+                except Exception:
+                    pass
+
+            try:
+                new_handler = add_hotkey(self.current_hotkey, self.trigger_snip)
+            except HotkeyError as error:
+                schedule_ui(lambda err=error: self.on_hotkey_bind_failed(err))
+                return
+            schedule_ui(lambda handle=new_handler: self.on_hotkey_bound(handle))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_hotkey_bound(self, new_handler) -> None:
+        if self.hotkey_handler is not None:
+            remove_hotkey(self.hotkey_handler)
+        self.hotkey_handler = new_handler
+        self.hotkey_status_message = "已启用"
+        self.update_local_hotkey_binding()
+        self.update_status_labels()
+        if platform.system() == "Darwin":
+            self.last_summary_var.set(f"最近一次扫描：快捷键已启用，按 {self.current_hotkey.upper()} 或点击“开始截图”。")
+
+    def on_hotkey_bind_failed(self, error: Exception) -> None:
+        self.hotkey_handler = None
+        self.hotkey_status_message = f"未启用：{error}"
+        self.update_local_hotkey_binding()
+        self.update_status_labels()
+        if platform.system() == "Darwin":
+            self.last_summary_var.set(
+                f"快捷键未启用。当前可在程序窗口内按 {self.current_hotkey.upper()}；如需全局生效，请开启“输入监控”和“辅助功能”后重启。"
+            )
+            return
+        self.last_summary_var.set("快捷键未启用，可先授权系统权限或修改快捷键后重试。")
+
+    def show_hotkey_error(self, error: Exception) -> None:
+        if platform.system() == "Darwin":
+            if self.macos_setup_notice_scheduled:
+                messagebox.showwarning("快捷键提示", f"{error}\n\n请按主界面的 macOS 前置设置开启“输入监控”，授权后重启程序。")
+                return
+            messagebox.showwarning("快捷键提示", f"{error}\n\n{MACOS_SETUP_NOTICE}")
+            return
+        messagebox.showwarning("快捷键提示", str(error))
 
     def change_hotkey(self) -> None:
         new_hotkey = simpledialog.askstring(
             "修改快捷键",
-            "请输入新的快捷键（例如：f4 或 ctrl+shift+a）",
+            f"请输入新的快捷键（例如：f4 或 {get_hotkey_example()}）",
             initialvalue=self.current_hotkey,
+            parent=self.root,
         )
         if not new_hotkey:
             return
@@ -789,15 +1326,31 @@ class BarcodeScannerApp:
         old_hotkey = self.current_hotkey
         old_handler = self.hotkey_handler
         try:
-            new_handler = keyboard.add_hotkey(new_hotkey, self.trigger_snip)
+            new_handler = add_hotkey(new_hotkey, self.trigger_snip)
             if old_handler is not None:
-                keyboard.remove_hotkey(old_handler)
+                remove_hotkey(old_handler)
             self.hotkey_handler = new_handler
             self.current_hotkey = new_hotkey
+            self.hotkey_status_message = "已启用"
+            self.update_local_hotkey_binding()
             self.save_config()
             self.update_status_labels()
             messagebox.showinfo("成功", f"快捷键已修改为：{self.current_hotkey.upper()}")
-        except Exception as error:
+        except HotkeyPermissionError as error:
+            if old_handler is not None:
+                remove_hotkey(old_handler)
+            self.hotkey_handler = None
+            self.current_hotkey = new_hotkey
+            self.hotkey_status_message = f"未启用：{error}"
+            self.update_local_hotkey_binding()
+            self.save_config()
+            self.update_status_labels()
+            messagebox.showwarning(
+                "快捷键提示",
+                f"快捷键已修改为：{self.current_hotkey.upper()}。\n\n"
+                "当前仅在 EasyBarcodeScan 窗口内可用；如需全局生效，请开启“输入监控”和“辅助功能”后重启程序。",
+            )
+        except HotkeyError as error:
             self.current_hotkey = old_hotkey
             self.hotkey_handler = old_handler
             messagebox.showerror("错误", f"设置快捷键失败，可能是格式不正确。\n{error}")
@@ -812,17 +1365,20 @@ class BarcodeScannerApp:
 
     def open_history(self) -> None:
         if self.history_window and self.history_window.winfo_exists():
-            self.history_window.lift()
+            self.bring_window_front(self.history_window)
             self.refresh_history_tree()
             return
 
         self.history_window = tk.Toplevel(self.root)
         self.history_window.title(f"{APP_NAME} - 历史记录")
         self.history_window.configure(bg="#f8fafc")
-        self.history_window.attributes("-topmost", True)
+        if platform.system() != "Darwin":
+            self.history_window.attributes("-topmost", True)
         self.center_window(self.history_window, 1080, 500)
         min_history_w, min_history_h = self.scale_window_size(self.history_window, 860, 420)
         self.history_window.minsize(min_history_w, min_history_h)
+        self.bring_window_front(self.history_window)
+        self.update_local_hotkey_binding()
 
         toolbar = tk.Frame(self.history_window, bg="#f8fafc")
         toolbar.pack(fill="x", padx=12, pady=(12, 6))
@@ -947,6 +1503,8 @@ class BarcodeScannerApp:
         min_result_w, min_result_h = self.scale_window_size(self.result_window, 820, 520)
         self.result_window.minsize(min_result_w, min_result_h)
         self.result_window.resizable(True, True)
+        self.bring_window_front(self.result_window)
+        self.update_local_hotkey_binding()
 
         header = tk.Frame(self.result_window, bg="#eef4ff")
         header.pack(fill="x", padx=16, pady=(14, 8))
@@ -1303,6 +1861,7 @@ class BarcodeScannerApp:
             self.image_preview_canvas.bind("<Double-Button-1>", lambda _: self.reset_preview_view())
             self.image_preview_window.protocol("WM_DELETE_WINDOW", self.close_result_image_preview)
             self.ensure_preview_window_front()
+            self.update_local_hotkey_binding()
 
         self.root.after(20, self.reset_preview_view)
 
@@ -1320,6 +1879,10 @@ class BarcodeScannerApp:
 
         try:
             self.image_preview_window.attributes("-topmost", True)
+            if platform.system() == "Darwin":
+                self.image_preview_window.after(
+                    200, lambda current_window=self.image_preview_window: self._set_window_topmost(current_window, False)
+                )
         except Exception:
             pass
 
@@ -1470,12 +2033,14 @@ class BarcodeScannerApp:
 
         self.login_win = tk.Toplevel(self.root)
         self.login_win.title(f"{APP_NAME} 登录")
-        self.login_win.attributes("-topmost", True)
+        if platform.system() != "Darwin":
+            self.login_win.attributes("-topmost", True)
         self.login_win.configure(bg="#eaf2ff")
         self.login_win.resizable(True, True)
         self.center_window(self.login_win, 640, 500)
         min_login_w, min_login_h = self.scale_window_size(self.login_win, 600, 450)
         self.login_win.minsize(min_login_w, min_login_h)
+        self.bring_window_front(self.login_win)
 
         self.login_session = requests.Session(impersonate="chrome110")
         self.auth_env = {}
@@ -1585,6 +2150,7 @@ class BarcodeScannerApp:
             self.entry_pwd.insert(0, self.saved_password)
 
         self.login_win.bind("<Return>", lambda _: self.submit_login_form())
+        self.update_local_hotkey_binding()
         threading.Thread(target=self.fetch_captcha_and_env, daemon=True).start()
 
     def fetch_captcha_and_env(self) -> None:
@@ -1809,6 +2375,10 @@ class BarcodeScannerApp:
         self.root.after(100, self.check_trigger)
 
     def start_snip(self) -> None:
+        if platform.system() == "Darwin":
+            self.start_macos_native_snip()
+            return
+
         try:
             self.full_screen = ImageGrab.grab()
         except Exception as error:
@@ -1817,7 +2387,8 @@ class BarcodeScannerApp:
 
         self.snip_win = tk.Toplevel(self.root)
         self.snip_win.attributes("-fullscreen", True)
-        self.snip_win.attributes("-topmost", True)
+        if platform.system() != "Darwin":
+            self.snip_win.attributes("-topmost", True)
         self.snip_win.config(cursor="cross")
 
         self.tk_img = ImageTk.PhotoImage(self.full_screen)
@@ -1833,6 +2404,57 @@ class BarcodeScannerApp:
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.snip_win.bind("<Escape>", lambda _: self.snip_win.destroy())
+
+    def start_macos_native_snip(self) -> None:
+        temp_path = ""
+        hidden_windows: list[tuple[tk.Toplevel, str]] = []
+        try:
+            hidden_windows = self.prepare_macos_capture_windows()
+            fd, temp_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            Path(temp_path).unlink(missing_ok=True)
+            self.last_summary_var.set("最近一次扫描：正在等待 macOS 截图框选...")
+            self.root.update_idletasks()
+            screencapture_bin = MACOS_SCREEN_CAPTURE_BIN if Path(MACOS_SCREEN_CAPTURE_BIN).exists() else "screencapture"
+            result = subprocess.run(
+                [screencapture_bin, "-i", "-x", temp_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                self.show_macos_capture_error(result)
+                return
+            if not Path(temp_path).exists() or Path(temp_path).stat().st_size <= 0:
+                return
+            with Image.open(temp_path) as image:
+                cropped_img = image.convert("RGB").copy()
+            if cropped_img.width <= 10 or cropped_img.height <= 10:
+                return
+            self.process_image(cropped_img)
+        except Exception as error:
+            messagebox.showerror("截屏失败", f"无法获取屏幕截图：{error}\n\n{MACOS_SETUP_NOTICE}")
+        finally:
+            if hidden_windows:
+                self.restore_macos_capture_windows(hidden_windows)
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def show_macos_capture_error(self, result: subprocess.CompletedProcess) -> None:
+        stderr = (result.stderr or "").strip()
+        if not stderr:
+            self.last_summary_var.set("最近一次扫描：截屏已取消；若未主动取消，请开启 macOS 屏幕录制权限。")
+            return
+        debug_console("macOS 截图失败", {"returncode": result.returncode, "stderr": stderr})
+        self.last_summary_var.set("最近一次扫描：截屏未完成，请确认已允许“屏幕录制”权限。")
+        messagebox.showwarning(
+            "截屏未完成",
+            "macOS 系统截图没有完成。如果你刚才按 ESC 取消，可以忽略此提示；"
+            f"如果没有取消，请先确认“屏幕录制”权限已授予当前应用。\n\n{MACOS_SETUP_NOTICE}",
+        )
 
     def on_press(self, event) -> None:
         self.start_x = event.x
@@ -2128,31 +2750,23 @@ class BarcodeScannerApp:
                     top += fine_step_y
 
         search_codes: list[str] = []
+        seen_search_codes: set[str] = set()
+
+        def add_search_code(normalized_code: str) -> None:
+            if normalized_code in seen_search_codes:
+                return
+            seen_search_codes.add(normalized_code)
+            search_codes.append(normalized_code)
+
         for normalized_code, clusters in detected_clusters_by_code.items():
             if not clusters:
                 continue
-
-            clusters_sorted = sorted(clusters, key=lambda item: int(item.get("hits", 0)), reverse=True)
-            confirmed_clusters = [cluster for cluster in clusters_sorted if int(cluster.get("hits", 0)) >= 2]
-            if confirmed_clusters:
-                chosen_clusters = list(confirmed_clusters)
-                if len(clusters_sorted) <= 2:
-                    chosen_clusters.extend(
-                        cluster for cluster in clusters_sorted if int(cluster.get("hits", 0)) == 1
-                    )
-            else:
-                chosen_clusters = list(clusters_sorted)
-
-            if len(chosen_clusters) > 6:
-                chosen_clusters = chosen_clusters[:6]
-
-            for _ in chosen_clusters:
-                search_codes.append(normalized_code)
+            add_search_code(normalized_code)
 
         for normalized_code, hits in seen_codes_without_box.items():
             if hits <= 0 or normalized_code in detected_clusters_by_code:
                 continue
-            search_codes.append(normalized_code)
+            add_search_code(normalized_code)
 
         return total_symbols, search_codes
 
@@ -2191,13 +2805,21 @@ class BarcodeScannerApp:
             messagebox.showwarning("识别失败", "截图中未发现有效的 69 码。")
             return
 
+        self.scan_session_counter += 1
+        session_id = self.scan_session_counter
+        self.active_scan_session_id = session_id
         self.is_querying = True
         self.query_total = len(search_codes)
         self.query_done = 0
         self.last_summary_var.set(f"最近一次扫描：正在查询 0/{self.query_total} 个条码...")
-        threading.Thread(target=self.query_multiple_products, args=(search_codes,), daemon=True).start()
+        threading.Thread(target=self.query_multiple_products, args=(search_codes, session_id), daemon=True).start()
 
-    def update_query_progress(self, done_count: int, total_count: int) -> None:
+    def is_active_scan_session(self, session_id: int | None) -> bool:
+        return session_id is not None and session_id == self.active_scan_session_id
+
+    def update_query_progress(self, done_count: int, total_count: int, session_id: int | None = None) -> None:
+        if not self.is_active_scan_session(session_id):
+            return
         if not self.is_querying:
             return
         self.query_done = max(0, done_count)
@@ -2206,32 +2828,35 @@ class BarcodeScannerApp:
             return
         self.last_summary_var.set(f"最近一次扫描：正在查询 {self.query_done}/{self.query_total} 个条码...")
 
-    def abort_query_due_auth(self, reason: str) -> None:
+    def abort_query_due_auth(self, reason: str, session_id: int | None = None) -> None:
+        if not self.is_active_scan_session(session_id):
+            return
         self.is_querying = False
+        self.active_scan_session_id = None
         self.query_done = 0
         self.query_total = 0
         self.mark_token_expired(reason)
 
-    def query_multiple_products(self, search_codes: list[str]) -> None:
+    def query_multiple_products(self, search_codes: list[str], session_id: int) -> None:
         error_texts = []
         new_records = []
         success_products = []
-        total_count = len(search_codes)
-        done_count = 0
-        barcode_counts: dict[str, int] = {}
         ordered_barcodes: list[str] = []
+        seen_barcodes: set[str] = set()
         for barcode in search_codes:
-            if barcode not in barcode_counts:
-                ordered_barcodes.append(barcode)
-                barcode_counts[barcode] = 0
-            barcode_counts[barcode] += 1
+            if barcode in seen_barcodes:
+                continue
+            seen_barcodes.add(barcode)
+            ordered_barcodes.append(barcode)
+        total_count = len(ordered_barcodes)
+        done_count = 0
         debug_console(
             "开始批量查询",
             {
                 "count": total_count,
                 "unique_count": len(ordered_barcodes),
                 "codes": search_codes,
-                "counts": barcode_counts,
+                "deduped_codes": ordered_barcodes,
             },
         )
 
@@ -2322,66 +2947,86 @@ class BarcodeScannerApp:
 
         debug_console("顺序查询模式", {"barcodes": ordered_barcodes})
         for barcode in ordered_barcodes:
-            repeat_count = int(barcode_counts.get(barcode, 1))
+            if not self.is_active_scan_session(session_id):
+                debug_console("忽略过期扫描会话", {"session_id": session_id, "barcode": barcode})
+                return
             query_result = fetch_product_item(barcode)
             if query_result.get("auth_expired"):
-                self.root.after(0, lambda: self.abort_query_due_auth("登录已失效或过期，请重新登录后再试。"))
+                self.root.after(
+                    0,
+                    lambda current_session_id=session_id: self.abort_query_due_auth(
+                        "登录已失效或过期，请重新登录后再试。", current_session_id
+                    ),
+                )
                 return
 
             if query_result.get("item") is not None:
                 item = query_result["item"]
-                for repeat_index in range(repeat_count):
-                    record = HistoryRecord.from_item(item, barcode)
-                    product_data = {
-                        "barcode": barcode,
-                        "product_name": record.product_name,
-                        "regulated_name": str(item.get("RegulatedProductName", "")).strip(),
-                        "brand": record.brand,
-                        "firm_name": record.firm_name,
-                        "specification": record.specification,
-                        "category": record.category,
-                        "description": str(item.get("description", "")).strip(),
-                        "picture_url": record.picture_url,
-                    }
-                    new_records.append(record)
-                    success_products.append(product_data)
+                record = HistoryRecord.from_item(item, barcode)
+                product_data = {
+                    "barcode": barcode,
+                    "product_name": record.product_name,
+                    "regulated_name": str(item.get("RegulatedProductName", "")).strip(),
+                    "brand": record.brand,
+                    "firm_name": record.firm_name,
+                    "specification": record.specification,
+                    "category": record.category,
+                    "description": str(item.get("description", "")).strip(),
+                    "picture_url": record.picture_url,
+                }
+                new_records.append(record)
+                success_products.append(product_data)
 
-                    done_count += 1
-                    delay_ms = repeat_index * 320 if repeat_count > 1 else 0
-                    self.root.after(
-                        delay_ms,
-                        lambda rec=record, prod=product_data: self.on_query_partial_success([rec], [prod]),
-                    )
-                    self.root.after(
-                        delay_ms,
-                        lambda current_done=done_count, total=total_count: self.update_query_progress(current_done, total),
-                    )
+                done_count += 1
+                self.root.after(
+                    0,
+                    lambda rec=record, prod=product_data, current_session_id=session_id: self.on_query_partial_success(
+                        [rec], [prod], current_session_id
+                    ),
+                )
+                self.root.after(
+                    0,
+                    lambda current_done=done_count, total=total_count, current_session_id=session_id: self.update_query_progress(
+                        current_done, total, current_session_id
+                    ),
+                )
             else:
                 if query_result.get("not_found"):
                     reason = "查无相关商品信息"
                 else:
                     reason = query_result.get("error") or "请求失败"
-                if repeat_count > 1:
-                    error_texts.append(f"条码 {barcode}：{reason}（x{repeat_count}）")
-                else:
-                    error_texts.append(f"条码 {barcode}：{reason}")
-                debug_console("条码查询失败", {"barcode": barcode, "reason": reason, "repeat_count": repeat_count})
+                error_texts.append(f"条码 {barcode}：{reason}")
+                debug_console("条码查询失败", {"barcode": barcode, "reason": reason})
 
-                done_count += repeat_count
+                done_count += 1
                 self.root.after(
                     0,
-                    lambda current_done=done_count, total=total_count: self.update_query_progress(current_done, total),
+                    lambda current_done=done_count, total=total_count, current_session_id=session_id: self.update_query_progress(
+                        current_done, total, current_session_id
+                    ),
                 )
 
-        self.root.after(0, lambda: self.on_query_finished(error_texts, new_records, success_products))
+        self.root.after(
+            0,
+            lambda current_session_id=session_id: self.on_query_finished(
+                error_texts,
+                new_records,
+                success_products,
+                current_session_id,
+            ),
+        )
 
     def on_query_finished(
         self,
         error_texts: list[str],
         new_records: list[HistoryRecord],
         success_products: list[dict],
+        session_id: int | None = None,
     ) -> None:
+        if not self.is_active_scan_session(session_id):
+            return
         self.is_querying = False
+        self.active_scan_session_id = None
         self.query_done = 0
         self.query_total = 0
         debug_console(
@@ -2412,7 +3057,14 @@ class BarcodeScannerApp:
             else:
                 self.last_summary_var.set("最近一次扫描：未查询到有效商品信息")
 
-    def on_query_partial_success(self, partial_records: list[HistoryRecord], partial_products: list[dict]) -> None:
+    def on_query_partial_success(
+        self,
+        partial_records: list[HistoryRecord],
+        partial_products: list[dict],
+        session_id: int | None = None,
+    ) -> None:
+        if not self.is_active_scan_session(session_id):
+            return
         if partial_records:
             self.add_history_records(partial_records)
 
@@ -2424,25 +3076,29 @@ class BarcodeScannerApp:
             self.result_products.extend(partial_products)
             self.result_index = old_len
             self.render_current_result()
-            self.result_window.lift()
+            self.bring_window_front(self.result_window)
             self.ensure_preview_window_front()
             return
 
         self.show_product_detail_window(partial_products)
         if self.result_window and self.result_window.winfo_exists():
-            self.result_window.lift()
+            self.bring_window_front(self.result_window)
             self.ensure_preview_window_front()
 
-    def on_close(self) -> None:
+    def quit_application(self) -> None:
         try:
             if self.hotkey_handler is not None:
-                keyboard.remove_hotkey(self.hotkey_handler)
+                remove_hotkey(self.hotkey_handler)
         except Exception:
             pass
         self.root.destroy()
 
 
-if __name__ == "__main__":
+def main() -> None:
     root = tk.Tk()
-    app = BarcodeScannerApp(root)
+    BarcodeScannerApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

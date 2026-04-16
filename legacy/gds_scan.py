@@ -1,11 +1,23 @@
+from pathlib import Path
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import cv2
 # 将原生的 requests 替换为 curl_cffi 提供的浏览器模拟 requests
 from curl_cffi import requests
+from easybarcodescan.global_hotkey import HotkeyError, add_hotkey, get_default_hotkey, remove_hotkey
+from easybarcodescan.zbar_compat import prepare_zbar_environment
+
+prepare_zbar_environment()
+
 from pyzbar.pyzbar import decode
 import tkinter as tk
 from tkinter import messagebox
 from PIL import ImageGrab, ImageTk
-import keyboard
 import numpy as np
 import time
 import threading
@@ -36,20 +48,30 @@ class BarcodeScannerApp:
         self.root.title("全局条码扫描助手")
         self.root.geometry("350x150")
         self.root.attributes("-topmost", True)  # 保持置顶
+        self.hotkey = get_default_hotkey()
+        self.hotkey_handler = None
 
         # 界面提示信息
         tk.Label(root, text="🚀 扫描助手已在后台运行", font=("Arial", 12, "bold")).pack(pady=10)
-        tk.Label(root, text="按 【Ctrl + Alt + A】 框选屏幕条形码\n按 【ESC】 退出截图", font=("Arial", 10)).pack(pady=10)
+        tk.Label(
+            root,
+            text=f"按 【{self.hotkey.upper()}】 框选屏幕条形码\n按 【ESC】 退出截图",
+            font=("Arial", 10),
+        ).pack(pady=10)
 
         # 标记是否正在截屏，防止快捷键重复触发
         self.is_snipping = False
 
         # 注册全局快捷键 (后台监听)
-        keyboard.add_hotkey('ctrl+alt+a', self.trigger_snip)
+        try:
+            self.hotkey_handler = add_hotkey(self.hotkey, self.trigger_snip)
+        except HotkeyError as error:
+            messagebox.showwarning("快捷键提示", f"快捷键未启用：{error}")
 
         # 启动定时器：用于在主线程中安全地拉起截图窗口
         # (避免跨线程直接操作 tkinter 导致的崩溃)
         self.check_trigger()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def trigger_snip(self):
         """快捷键触发回调，修改状态位"""
@@ -63,6 +85,10 @@ class BarcodeScannerApp:
             self.is_snipping = False
         # 每100毫秒检查一次
         self.root.after(100, self.check_trigger)
+
+    def on_close(self):
+        remove_hotkey(self.hotkey_handler)
+        self.root.destroy()
 
     # ========== 截图核心逻辑 ==========
     def start_snip(self):

@@ -1,6 +1,7 @@
 curl_cffi>=0.7.0
-keyboard>=0.13.5
+keyboard>=0.13.5; platform_system != "Darwin"
 numpy>=1.24.0
 Pillow>=10.0.0
+pyobjc-framework-Quartz; platform_system == "Darwin"
 pyzbar>=0.1.9
 pyinstaller>=6.0.0
