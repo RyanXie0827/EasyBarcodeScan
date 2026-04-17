@@ -123,8 +123,8 @@ Copy-Item config/config.example.json config/config.json
 
 本项目目标是同时兼容 macOS 和 Windows：
 
-- macOS 交付物：`dist/EasyBarcodeScan.app`、`dist/EasyBarcodeScan.dmg`
-- Windows 交付物：`dist/EasyBarcodeScan.exe`
+- macOS 交付物：`dist/macos/EasyBarcodeScan.app`、`dist/macos/EasyBarcodeScan-v<版本号>.dmg`
+- Windows 交付物：`dist/windows/EasyBarcodeScan-v<版本号>.exe`
 
 ### 1) macOS 一键运行
 
@@ -147,7 +147,7 @@ bash scripts/macos_onekey.sh build
 
 输出：
 
-- `dist/EasyBarcodeScan.app`
+- `dist/macos/EasyBarcodeScan.app`
 
 ### 3) Windows 一键运行
 
@@ -185,7 +185,7 @@ scripts\build_windows.bat build
 
 输出：
 
-- `dist/EasyBarcodeScan.exe`
+- `dist/windows/EasyBarcodeScan-v<版本号>.exe`
 
 ### 5) 构建 macOS `.dmg`
 
@@ -195,13 +195,13 @@ bash scripts/build_macos_dmg.sh
 
 默认输入 / 输出：
 
-- 输入：`dist/EasyBarcodeScan.app`
-- 输出：`dist/EasyBarcodeScan.dmg`
+- 输入：`dist/macos/EasyBarcodeScan.app`
+- 输出：`dist/macos/EasyBarcodeScan-v<版本号>.dmg`
 
 也可以自定义：
 
 ```bash
-bash scripts/build_macos_dmg.sh dist/EasyBarcodeScan.app dist/EasyBarcodeScan-v1.0.0.dmg EasyBarcodeScan
+bash scripts/build_macos_dmg.sh dist/macos/EasyBarcodeScan.app dist/macos/EasyBarcodeScan-v1.0.0.dmg EasyBarcodeScan
 ```
 
 ### 6) 重新生成图标文件
@@ -246,7 +246,7 @@ bash scripts/build_macos_dmg.sh
 
 macOS 最终交付文件：
 
-- `dist/EasyBarcodeScan.dmg`
+- `dist/macos/EasyBarcodeScan-v<版本号>.dmg`
 
 Windows：
 
@@ -256,7 +256,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build
 
 Windows 最终交付文件：
 
-- `dist/EasyBarcodeScan.exe`
+- `dist/windows/EasyBarcodeScan-v<版本号>.exe`
 
 > 当前产物建议进一步做 Apple Developer ID 签名与公证后再正式发客户。
 

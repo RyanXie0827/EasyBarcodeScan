@@ -20,14 +20,15 @@ from pathlib import Path
 
 import tkinter as tk
 from curl_cffi import requests
-from .global_hotkey import HotkeyError, HotkeyPermissionError, add_hotkey, get_default_hotkey, get_hotkey_example, remove_hotkey
+from .global_hotkey import HotkeyError, HotkeyPermissionError, add_hotkey, get_default_hotkey, remove_hotkey
+from .version import APP_VERSION
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageGrab, ImageOps, ImageTk
 from .zbar_compat import prepare_zbar_environment
 
 prepare_zbar_environment()
 
 from pyzbar.pyzbar import decode
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 
 
 _DIALOG_PARENT = None
@@ -112,7 +113,6 @@ if platform.system() == "Windows":
 
 
 APP_NAME = "EasyBarcodeScan"
-APP_VERSION = "1.0.2"
 API_URL = "https://bff.gds.org.cn/gds/searching-api/ProductService/ProductListByGTIN"
 MAX_HISTORY_ITEMS = 200
 TOKEN_EXPIRY_SKEW_SECONDS = 30
@@ -251,6 +251,100 @@ def build_picture_candidates(picture_url: str) -> list[str]:
     return candidates
 
 
+HOTKEY_MODIFIER_ORDER = ("command", "ctrl", "alt", "shift")
+HOTKEY_MODIFIER_KEYS = {
+    "control_l": "ctrl",
+    "control_r": "ctrl",
+    "shift_l": "shift",
+    "shift_r": "shift",
+    "alt_l": "alt",
+    "alt_r": "alt",
+    "option_l": "alt",
+    "option_r": "alt",
+    "meta_l": "command",
+    "meta_r": "command",
+    "command": "command",
+    "command_l": "command",
+    "command_r": "command",
+    "super_l": "command",
+    "super_r": "command",
+}
+HOTKEY_TOKEN_ALIASES = {
+    "cmd": "command",
+    "ctl": "ctrl",
+    "control": "ctrl",
+    "option": "alt",
+    "return": "enter",
+    "escape": "esc",
+}
+HOTKEY_DISPLAY_NAMES = {
+    "command": "Command",
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "esc": "Esc",
+    "tab": "Tab",
+    "enter": "Enter",
+    "space": "Space",
+    "delete": "Delete",
+    "backspace": "Backspace",
+    "left": "Left",
+    "right": "Right",
+    "up": "Up",
+    "down": "Down",
+}
+HOTKEY_SPECIAL_KEYS = {
+    "space": "space",
+    "tab": "tab",
+    "iso_left_tab": "tab",
+    "return": "enter",
+    "enter": "enter",
+    "kp_enter": "enter",
+    "escape": "esc",
+    "esc": "esc",
+    "left": "left",
+    "right": "right",
+    "up": "up",
+    "down": "down",
+    "delete": "delete",
+    "backspace": "backspace",
+}
+
+
+def normalize_optional_text(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in {"none", "null"}:
+        return ""
+    return text
+
+
+def pick_first_text(data: dict, *keys: str, default: str = "") -> str:
+    if not isinstance(data, dict):
+        return default
+    for key in keys:
+        text = normalize_optional_text(data.get(key))
+        if text:
+            return text
+    return default
+
+
+def get_product_name_text(item_data: dict, default: str = "未知") -> str:
+    return pick_first_text(
+        item_data,
+        "keyword",
+        "RegulatedProductName",
+        "regulatedProductName",
+        "ProductName",
+        "productName",
+        "product_name",
+        default=default,
+    )
+
+
 def debug_console(message: str, payload=None) -> None:
     if not ENABLE_CONSOLE_DEBUG:
         return
@@ -287,11 +381,11 @@ class HistoryRecord:
         return cls(
             query_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             barcode=barcode,
-            product_name=item_data.get("keyword", "未知"),
-            brand=item_data.get("brandcn", "未知"),
-            firm_name=item_data.get("firm_name", "未知"),
-            specification=item_data.get("specification", "未知"),
-            category=item_data.get("gpcname", "未知"),
+            product_name=get_product_name_text(item_data),
+            brand=normalize_optional_text(item_data.get("brandcn")) or "未知",
+            firm_name=normalize_optional_text(item_data.get("firm_name")) or "未知",
+            specification=normalize_optional_text(item_data.get("specification")) or "未知",
+            category=normalize_optional_text(item_data.get("gpcname")) or "未知",
             picture_url=build_picture_url(item_data),
         )
 
@@ -380,7 +474,7 @@ class BarcodeScannerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.hide_main_window)
 
     def get_initial_hotkey(self) -> str:
-        configured_hotkey = str(self.config.get("hotkey", "") or "").strip().lower()
+        configured_hotkey = self.normalize_hotkey_text(str(self.config.get("hotkey", "") or ""))
         default_hotkey = get_default_hotkey()
         if platform.system() == "Darwin" and configured_hotkey in (
             "",
@@ -428,6 +522,249 @@ class BarcodeScannerApp:
         if platform.system() == "Darwin":
             return "Command + Q"
         return "Ctrl + Q"
+
+    @staticmethod
+    def sort_hotkey_modifiers(modifiers) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for token in HOTKEY_MODIFIER_ORDER:
+            if token in modifiers and token not in seen:
+                ordered.append(token)
+                seen.add(token)
+        for token in modifiers:
+            if token not in seen:
+                ordered.append(token)
+                seen.add(token)
+        return ordered
+
+    @staticmethod
+    def normalize_hotkey_text(hotkey: str) -> str:
+        raw_tokens = [part.strip().lower() for part in str(hotkey or "").replace("＋", "+").split("+") if part.strip()]
+        if not raw_tokens:
+            return ""
+
+        normalized_tokens: list[str] = []
+        for token in raw_tokens:
+            token = HOTKEY_TOKEN_ALIASES.get(token, token)
+            if re.fullmatch(r"f\d{1,2}", token):
+                token = token.lower()
+            normalized_tokens.append(token)
+
+        if len(normalized_tokens) == 1:
+            return normalized_tokens[0]
+
+        key_token = normalized_tokens[-1]
+        modifier_tokens = BarcodeScannerApp.sort_hotkey_modifiers(normalized_tokens[:-1])
+        return "+".join(modifier_tokens + [key_token])
+
+    @staticmethod
+    def get_hotkey_display_text(hotkey: str) -> str:
+        normalized_hotkey = BarcodeScannerApp.normalize_hotkey_text(hotkey)
+        if not normalized_hotkey:
+            return ""
+
+        display_parts: list[str] = []
+        for token in normalized_hotkey.split("+"):
+            if len(token) == 1 and token.isalnum():
+                display_parts.append(token.upper())
+                continue
+            if re.fullmatch(r"f\d{1,2}", token):
+                display_parts.append(token.upper())
+                continue
+            display_parts.append(HOTKEY_DISPLAY_NAMES.get(token, token.title()))
+        return " + ".join(display_parts)
+
+    @staticmethod
+    def get_hotkey_modifier_token(keysym: str) -> str | None:
+        token = HOTKEY_MODIFIER_KEYS.get(str(keysym or "").strip().lower())
+        if token == "command" and platform.system() != "Darwin":
+            return None
+        return token
+
+    def get_hotkey_modifiers_from_state(self, state: int, active_modifiers: list[str]) -> list[str]:
+        modifiers = set(active_modifiers)
+        if state & 0x0004:
+            modifiers.add("ctrl")
+        if state & 0x0001:
+            modifiers.add("shift")
+        if state & 0x0008:
+            modifiers.add("alt")
+        if platform.system() == "Darwin" and state & (0x0010 | 0x0040 | 0x0080):
+            modifiers.add("command")
+        return self.sort_hotkey_modifiers(modifiers)
+
+    @staticmethod
+    def normalize_hotkey_key_token(keysym: str) -> str | None:
+        raw_key = str(keysym or "").strip()
+        if not raw_key:
+            return None
+
+        lower_key = raw_key.lower()
+        if lower_key in HOTKEY_MODIFIER_KEYS:
+            return None
+        if len(raw_key) == 1 and raw_key.isalnum():
+            return raw_key.lower()
+        if lower_key.startswith("kp_"):
+            keypad_key = lower_key[3:]
+            if len(keypad_key) == 1 and keypad_key.isdigit():
+                return keypad_key
+        mapped_key = HOTKEY_SPECIAL_KEYS.get(lower_key)
+        if mapped_key:
+            return mapped_key
+        if re.fullmatch(r"f\d{1,2}", lower_key):
+            try:
+                if 1 <= int(lower_key[1:]) <= 19:
+                    return lower_key
+            except Exception:
+                return None
+        return None
+
+    def get_hotkey_modifier_preview_text(self, modifiers: list[str]) -> str:
+        if not modifiers:
+            return "请按新的快捷键"
+        preview = [HOTKEY_DISPLAY_NAMES.get(token, token.title()) for token in self.sort_hotkey_modifiers(modifiers)]
+        return " + ".join(preview + ["..."])
+
+    def build_hotkey_from_key_event(self, keysym: str, state: int, active_modifiers: list[str]) -> str | None:
+        key_token = self.normalize_hotkey_key_token(keysym)
+        if not key_token:
+            return None
+        modifier_tokens = self.get_hotkey_modifiers_from_state(state, active_modifiers)
+        return self.normalize_hotkey_text("+".join(modifier_tokens + [key_token]))
+
+    def capture_hotkey_from_keyboard(self) -> str | None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("修改快捷键")
+        dialog.configure(bg="#f8fafc")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        self.center_window(dialog, 430, 220)
+
+        result = {"value": None}
+        active_modifiers: list[str] = []
+        preview_var = tk.StringVar(value="请按新的快捷键")
+        tip_var = tk.StringVar(
+            value="支持字母、数字、F1-F19、方向键、ESC、TAB、ENTER、SPACE、DELETE。"
+        )
+
+        tk.Label(
+            dialog,
+            text="请直接按新的快捷键组合，识别后会自动保存。",
+            font=("微软雅黑", 10, "bold"),
+            bg="#f8fafc",
+            fg="#0f172a",
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(16, 6))
+        tk.Label(
+            dialog,
+            text=f"当前快捷键：{self.get_hotkey_display_text(self.current_hotkey)}",
+            font=("微软雅黑", 9),
+            bg="#f8fafc",
+            fg="#64748b",
+            justify="left",
+        ).pack(anchor="w", padx=18)
+
+        capture_box = tk.Frame(
+            dialog,
+            bg="#ffffff",
+            bd=1,
+            relief="solid",
+            highlightbackground="#cbd5e1",
+            highlightcolor="#2563eb",
+            highlightthickness=1,
+            takefocus=1,
+        )
+        capture_box.pack(fill="x", padx=18, pady=(14, 8))
+        tk.Label(
+            capture_box,
+            textvariable=preview_var,
+            font=("微软雅黑", 15, "bold"),
+            bg="#ffffff",
+            fg="#1d4ed8",
+            pady=18,
+        ).pack(fill="x")
+        tk.Label(
+            dialog,
+            textvariable=tip_var,
+            font=("微软雅黑", 9),
+            bg="#f8fafc",
+            fg="#475569",
+            wraplength=394,
+            justify="left",
+        ).pack(anchor="w", padx=18)
+
+        button_frame = tk.Frame(dialog, bg="#f8fafc")
+        button_frame.pack(fill="x", padx=18, pady=(14, 14))
+
+        def close_dialog() -> None:
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        def cancel_dialog() -> None:
+            result["value"] = None
+            close_dialog()
+
+        ttk.Button(button_frame, text="取消", style="Secondary.TButton", command=cancel_dialog).pack(side="right")
+
+        def on_key_press(event) -> str:
+            keysym = str(getattr(event, "keysym", "") or "")
+            modifier_token = self.get_hotkey_modifier_token(keysym)
+            if modifier_token:
+                if modifier_token not in active_modifiers:
+                    active_modifiers.append(modifier_token)
+                preview_var.set(self.get_hotkey_modifier_preview_text(active_modifiers))
+                tip_var.set("已识别修饰键，请继续按主键完成组合。")
+                return "break"
+
+            hotkey = self.build_hotkey_from_key_event(keysym, int(getattr(event, "state", 0) or 0), active_modifiers)
+            if not hotkey:
+                preview_var.set("不支持的按键")
+                tip_var.set("请改用字母、数字、F1-F19、方向键、ESC、TAB、ENTER、SPACE、DELETE。")
+                return "break"
+
+            result["value"] = hotkey
+            preview_var.set(self.get_hotkey_display_text(hotkey))
+            tip_var.set("已识别，正在保存快捷键……")
+            dialog.after(120, close_dialog)
+            return "break"
+
+        def on_key_release(event) -> str:
+            modifier_token = self.get_hotkey_modifier_token(str(getattr(event, "keysym", "") or ""))
+            if modifier_token in active_modifiers:
+                active_modifiers.remove(modifier_token)
+            if result["value"] is None:
+                preview_var.set(self.get_hotkey_modifier_preview_text(active_modifiers))
+            return "break"
+
+        dialog.protocol("WM_DELETE_WINDOW", cancel_dialog)
+        dialog.bind("<Button-1>", lambda _event: capture_box.focus_set(), add="+")
+        capture_box.bind("<Button-1>", lambda _event: capture_box.focus_set())
+        capture_box.bind("<KeyPress>", on_key_press)
+        capture_box.bind("<KeyRelease>", on_key_release)
+
+        self.bring_window_front(dialog, self.root)
+        dialog.grab_set()
+        capture_box.focus_set()
+        dialog.wait_window()
+        return result["value"]
+
+    def restore_hotkey_binding(self, hotkey: str, should_bind: bool, fallback_status_message: str) -> None:
+        self.current_hotkey = hotkey
+        self.hotkey_handler = None
+        self.hotkey_status_message = fallback_status_message
+        if should_bind:
+            try:
+                self.hotkey_handler = add_hotkey(hotkey, self.trigger_snip)
+                self.hotkey_status_message = "已启用"
+            except HotkeyPermissionError as error:
+                self.hotkey_status_message = f"未启用：{error}"
+            except HotkeyError as error:
+                debug_console("恢复快捷键失败", {"hotkey": hotkey, "error": str(error)})
+        self.update_local_hotkey_binding()
+        self.update_status_labels()
 
     def update_local_hotkey_binding(self) -> None:
         if platform.system() != "Darwin":
@@ -715,8 +1052,9 @@ class BarcodeScannerApp:
             self.root.withdraw()
         except Exception:
             return
+        hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()
         self.last_summary_var.set(
-            f"最近一次扫描：主窗口已隐藏到后台，仍可按 {self.current_hotkey.upper()} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
+            f"最近一次扫描：主窗口已隐藏到后台，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
         )
 
     def show_main_window(self, *_args) -> None:
@@ -742,7 +1080,8 @@ class BarcodeScannerApp:
         self.summary_label.config(wraplength=max(220, width - 6))
 
     def update_status_labels(self) -> None:
-        hotkey_text = f"当前快捷键：{self.current_hotkey.upper()}"
+        hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()
+        hotkey_text = f"当前快捷键：{hotkey_display}"
         if self.hotkey_status_message:
             hotkey_text = f"{hotkey_text}（{self.hotkey_status_message}）"
         self.hotkey_label.config(text=hotkey_text)
@@ -1229,12 +1568,12 @@ class BarcodeScannerApp:
                 HistoryRecord(
                     query_time=str(item.get("query_time", "")),
                     barcode=str(item.get("barcode", "")),
-                    product_name=str(item.get("product_name", "未知")),
-                    brand=str(item.get("brand", "未知")),
-                    firm_name=str(item.get("firm_name", "未知")),
-                    specification=str(item.get("specification", "未知")),
-                    category=str(item.get("category", "未知")),
-                    picture_url=str(item.get("picture_url", "")),
+                    product_name=normalize_optional_text(item.get("product_name")) or "未知",
+                    brand=normalize_optional_text(item.get("brand")) or "未知",
+                    firm_name=normalize_optional_text(item.get("firm_name")) or "未知",
+                    specification=normalize_optional_text(item.get("specification")) or "未知",
+                    category=normalize_optional_text(item.get("category")) or "未知",
+                    picture_url=normalize_optional_text(item.get("picture_url")),
                 )
             )
         return parsed_records[:MAX_HISTORY_ITEMS]
@@ -1286,7 +1625,8 @@ class BarcodeScannerApp:
         self.update_local_hotkey_binding()
         self.update_status_labels()
         if platform.system() == "Darwin":
-            self.last_summary_var.set(f"最近一次扫描：快捷键已启用，按 {self.current_hotkey.upper()} 或点击“开始截图”。")
+            hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()
+            self.last_summary_var.set(f"最近一次扫描：快捷键已启用，按 {hotkey_display} 或点击“开始截图”。")
 
     def on_hotkey_bind_failed(self, error: Exception) -> None:
         self.hotkey_handler = None
@@ -1294,8 +1634,9 @@ class BarcodeScannerApp:
         self.update_local_hotkey_binding()
         self.update_status_labels()
         if platform.system() == "Darwin":
+            hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()
             self.last_summary_var.set(
-                f"快捷键未启用。当前可在程序窗口内按 {self.current_hotkey.upper()}；如需全局生效，请开启“输入监控”和“辅助功能”后重启。"
+                f"快捷键未启用。当前可在程序窗口内按 {hotkey_display}；如需全局生效，请开启“输入监控”和“辅助功能”后重启。"
             )
             return
         self.last_summary_var.set("快捷键未启用，可先授权系统权限或修改快捷键后重试。")
@@ -1310,35 +1651,36 @@ class BarcodeScannerApp:
         messagebox.showwarning("快捷键提示", str(error))
 
     def change_hotkey(self) -> None:
-        new_hotkey = simpledialog.askstring(
-            "修改快捷键",
-            f"请输入新的快捷键（例如：f4 或 {get_hotkey_example()}）",
-            initialvalue=self.current_hotkey,
-            parent=self.root,
-        )
-        if not new_hotkey:
-            return
-
-        new_hotkey = new_hotkey.lower().strip()
-        if not new_hotkey or new_hotkey == self.current_hotkey:
-            return
-
         old_hotkey = self.current_hotkey
-        old_handler = self.hotkey_handler
+        old_status_message = self.hotkey_status_message
+        old_hotkey_enabled = self.hotkey_handler is not None
+
+        if old_hotkey_enabled:
+            remove_hotkey(self.hotkey_handler)
+            self.hotkey_handler = None
+        self.hotkey_status_message = "录入中"
+        self.update_status_labels()
+
+        new_hotkey = self.capture_hotkey_from_keyboard()
+        if not new_hotkey:
+            self.restore_hotkey_binding(old_hotkey, old_hotkey_enabled, old_status_message)
+            return
+
+        new_hotkey = self.normalize_hotkey_text(new_hotkey)
+        if not new_hotkey or new_hotkey == self.current_hotkey:
+            self.restore_hotkey_binding(old_hotkey, old_hotkey_enabled, old_status_message)
+            return
+
         try:
             new_handler = add_hotkey(new_hotkey, self.trigger_snip)
-            if old_handler is not None:
-                remove_hotkey(old_handler)
             self.hotkey_handler = new_handler
             self.current_hotkey = new_hotkey
             self.hotkey_status_message = "已启用"
             self.update_local_hotkey_binding()
             self.save_config()
             self.update_status_labels()
-            messagebox.showinfo("成功", f"快捷键已修改为：{self.current_hotkey.upper()}")
+            messagebox.showinfo("成功", f"快捷键已修改为：{self.get_hotkey_display_text(self.current_hotkey)}")
         except HotkeyPermissionError as error:
-            if old_handler is not None:
-                remove_hotkey(old_handler)
             self.hotkey_handler = None
             self.current_hotkey = new_hotkey
             self.hotkey_status_message = f"未启用：{error}"
@@ -1347,12 +1689,11 @@ class BarcodeScannerApp:
             self.update_status_labels()
             messagebox.showwarning(
                 "快捷键提示",
-                f"快捷键已修改为：{self.current_hotkey.upper()}。\n\n"
+                f"快捷键已修改为：{self.get_hotkey_display_text(self.current_hotkey)}。\n\n"
                 "当前仅在 EasyBarcodeScan 窗口内可用；如需全局生效，请开启“输入监控”和“辅助功能”后重启程序。",
             )
         except HotkeyError as error:
-            self.current_hotkey = old_hotkey
-            self.hotkey_handler = old_handler
+            self.restore_hotkey_binding(old_hotkey, old_hotkey_enabled, old_status_message)
             messagebox.showerror("错误", f"设置快捷键失败，可能是格式不正确。\n{error}")
 
     def add_history_records(self, records: list[HistoryRecord]) -> None:
@@ -1705,21 +2046,21 @@ class BarcodeScannerApp:
         total_count = len(self.result_products)
         self.result_count_var.set(f"{self.result_index + 1} / {total_count}")
 
-        product_name = str(product.get("product_name", "-")).strip() or "-"
-        regulated_name = str(product.get("regulated_name", "")).strip()
+        product_name = normalize_optional_text(product.get("product_name")) or "-"
+        regulated_name = normalize_optional_text(product.get("regulated_name"))
         regulated_to_show = regulated_name if regulated_name and regulated_name != product_name else None
-        description = str(product.get("description", "")).strip()
+        description = normalize_optional_text(product.get("description"))
         description_to_show = description if description else None
 
-        picture_url = str(product.get("picture_url", "")).strip()
+        picture_url = normalize_optional_text(product.get("picture_url"))
         picture_candidates = build_picture_candidates(picture_url)
         self.result_product_name_var.set(product_name)
         detail_data = [
-            ("barcode", str(product.get("barcode", "-")).strip() or "-"),
-            ("brand", str(product.get("brand", "-")).strip() or "-"),
-            ("firm_name", str(product.get("firm_name", "-")).strip() or "-"),
-            ("specification", str(product.get("specification", "-")).strip() or "-"),
-            ("category", str(product.get("category", "-")).strip() or "-"),
+            ("barcode", normalize_optional_text(product.get("barcode")) or "-"),
+            ("brand", normalize_optional_text(product.get("brand")) or "-"),
+            ("firm_name", normalize_optional_text(product.get("firm_name")) or "-"),
+            ("specification", normalize_optional_text(product.get("specification")) or "-"),
+            ("category", normalize_optional_text(product.get("category")) or "-"),
             ("regulated_name", regulated_to_show),
             ("description", description_to_show),
         ]
@@ -2966,12 +3307,12 @@ class BarcodeScannerApp:
                 product_data = {
                     "barcode": barcode,
                     "product_name": record.product_name,
-                    "regulated_name": str(item.get("RegulatedProductName", "")).strip(),
+                    "regulated_name": normalize_optional_text(item.get("RegulatedProductName")),
                     "brand": record.brand,
                     "firm_name": record.firm_name,
                     "specification": record.specification,
                     "category": record.category,
-                    "description": str(item.get("description", "")).strip(),
+                    "description": normalize_optional_text(item.get("description")),
                     "picture_url": record.picture_url,
                 }
                 new_records.append(record)

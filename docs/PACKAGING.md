@@ -26,12 +26,12 @@ scripts\build_windows.bat build
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m PyInstaller --noconfirm --clean packaging/pyinstaller/easybarcodescan.spec
+python -m PyInstaller --noconfirm --clean --distpath dist/windows --workpath build/windows packaging/pyinstaller/easybarcodescan.spec
 ```
 
 输出文件：
 
-- `dist/EasyBarcodeScan.exe`
+- `dist/windows/EasyBarcodeScan-v<版本号>.exe`
 
 ## 3) macOS 打包 APP
 
@@ -47,12 +47,12 @@ bash scripts/macos_onekey.sh build
 
 ```bash
 python3 -m pip install -r requirements.txt
-PYTHONPATH=src python3 -m PyInstaller --noconfirm --clean packaging/pyinstaller/easybarcodescan.spec
+PYTHONPATH=src python3 -m PyInstaller --noconfirm --clean --distpath dist/macos --workpath build/macos packaging/pyinstaller/easybarcodescan.spec
 ```
 
 输出文件：
 
-- `dist/EasyBarcodeScan.app`
+- `dist/macos/EasyBarcodeScan.app`
 
 ## 4) macOS 打包 DMG
 
@@ -62,7 +62,7 @@ bash scripts/build_macos_dmg.sh
 
 输出文件：
 
-- `dist/EasyBarcodeScan.dmg`
+- `dist/macos/EasyBarcodeScan-v<版本号>.dmg`
 
 ## 5) 图标资源
 

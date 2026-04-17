@@ -28,7 +28,7 @@ bash scripts/macos_onekey.sh build
 
 Output:
 
-- `dist/EasyBarcodeScan.app`
+- `dist/macos/EasyBarcodeScan.app`
 
 ## 4) Build `.dmg`
 
@@ -38,7 +38,7 @@ bash scripts/build_macos_dmg.sh
 
 Output:
 
-- `dist/EasyBarcodeScan.dmg`
+- `dist/macos/EasyBarcodeScan-v<版本号>.dmg`
 
 ## 5) Config path
 

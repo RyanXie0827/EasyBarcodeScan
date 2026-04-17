@@ -11,7 +11,9 @@ project_root = Path(SPECPATH).resolve().parents[1]
 source_root = project_root / "src"
 mac_icon_path = project_root / "assets" / "icons" / "app_icon.icns"
 windows_icon_path = project_root / "assets" / "icons" / "app_icon.ico"
-app_version = "1.0.2"
+version_ns = {}
+exec((source_root / "easybarcodescan" / "version.py").read_text(encoding="utf-8"), version_ns)
+app_version = version_ns["APP_VERSION"]
 
 hidden_imports = []
 pyzbar_binaries = []

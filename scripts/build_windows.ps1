@@ -9,6 +9,18 @@ $ErrorActionPreference = "Stop"
 $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $VenvDir = Join-Path $RootDir ".venv_win"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$WindowsDistDir = Join-Path $RootDir "dist\windows"
+$WindowsBuildDir = Join-Path $RootDir "build\windows"
+$PyInstallerCacheDir = if ($env:PYINSTALLER_CONFIG_DIR) { $env:PYINSTALLER_CONFIG_DIR } else { Join-Path $RootDir ".pyinstaller\windows" }
+$VersionSource = Join-Path $RootDir "src\easybarcodescan\version.py"
+$VersionMatch = [regex]::Match((Get-Content $VersionSource -Raw), 'APP_VERSION\s*=\s*"([^"]+)"')
+if (-not $VersionMatch.Success) {
+    Write-Host "Cannot read APP_VERSION from $VersionSource" -ForegroundColor Red
+    exit 1
+}
+$AppVersion = $VersionMatch.Groups[1].Value
+$VersionSuffix = "v$AppVersion"
+$VersionedExePath = Join-Path $WindowsDistDir "EasyBarcodeScan-$VersionSuffix.exe"
 
 Set-Location $RootDir
 
@@ -25,6 +37,7 @@ if (-not (Test-Path $VenvPython)) {
 
 $env:PYTHONPATH = Join-Path $RootDir "src"
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+$env:PYINSTALLER_CONFIG_DIR = $PyInstallerCacheDir
 
 Write-Host "Installing Python dependencies ..."
 & $VenvPython -m pip install -r requirements.txt
@@ -36,11 +49,20 @@ switch ($Mode) {
     }
     "build" {
         Write-Host "Cleaning old build artifacts ..."
-        if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
-        if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
+        if (Test-Path $WindowsBuildDir) { Remove-Item -Recurse -Force $WindowsBuildDir }
+        if (Test-Path $WindowsDistDir) { Remove-Item -Recurse -Force $WindowsDistDir }
+        if (Test-Path $PyInstallerCacheDir) { Remove-Item -Recurse -Force $PyInstallerCacheDir }
+
+        New-Item -ItemType Directory -Force -Path $WindowsBuildDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $WindowsDistDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $PyInstallerCacheDir | Out-Null
 
         Write-Host "Building Windows EXE ..."
-        & $VenvPython -m PyInstaller --noconfirm --clean packaging/pyinstaller/easybarcodescan.spec
-        Write-Host "Done: dist\EasyBarcodeScan.exe"
+        & $VenvPython -m PyInstaller --noconfirm --clean --distpath $WindowsDistDir --workpath $WindowsBuildDir packaging/pyinstaller/easybarcodescan.spec
+        $DefaultExePath = Join-Path $WindowsDistDir "EasyBarcodeScan.exe"
+        if (Test-Path $DefaultExePath) {
+            Move-Item -Force $DefaultExePath $VersionedExePath
+        }
+        Write-Host "Done: dist\windows\EasyBarcodeScan-$VersionSuffix.exe"
     }
 }

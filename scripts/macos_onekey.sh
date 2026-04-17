@@ -7,7 +7,9 @@ APP_NAME="EasyBarcodeScan"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv_mac}"
-PYINSTALLER_CACHE_DIR="${PYINSTALLER_CONFIG_DIR:-$ROOT_DIR/.pyinstaller}"
+DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist/macos}"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/macos}"
+PYINSTALLER_CACHE_DIR="${PYINSTALLER_CONFIG_DIR:-$ROOT_DIR/.pyinstaller/macos}"
 cd "$ROOT_DIR"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -71,10 +73,11 @@ case "$MODE" in
     ;;
   build)
     echo "🧹 Cleaning old build artifacts ..."
-    rm -rf build dist
+    rm -rf "$BUILD_DIR" "$DIST_DIR" "$PYINSTALLER_CACHE_DIR"
+    mkdir -p "$BUILD_DIR" "$DIST_DIR" "$PYINSTALLER_CACHE_DIR"
     echo "🏗️ Building macOS app ..."
-    python -m PyInstaller --noconfirm --clean packaging/pyinstaller/easybarcodescan.spec
-    echo "✅ Done: dist/${APP_NAME}.app"
+    python -m PyInstaller --noconfirm --clean --distpath "$DIST_DIR" --workpath "$BUILD_DIR" packaging/pyinstaller/easybarcodescan.spec
+    echo "✅ Done: ${DIST_DIR}/${APP_NAME}.app"
     ;;
   *)
     echo "Usage: bash scripts/macos_onekey.sh [run|build]"
