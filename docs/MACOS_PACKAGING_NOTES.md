@@ -3,9 +3,8 @@
 ## What was hardened
 
 - Source code is now organized under `src/easybarcodescan/`
-- Development config is now stored at `config/config.json`
-- Packaged app config remains:
-  - `~/Library/Application Support/EasyBarcodeScan/config.json`
+- Runtime config is stored at `~/.easybarcodescan/config.json`
+- Runtime debug/API log is stored at `~/.easybarcodescan/easybarcodescan.log`
 - Legacy `config.json` in old locations is auto-migrated to the new path
 - `src/easybarcodescan/global_hotkey.py` uses Quartz event taps on macOS, avoiding the old `keyboard` listener path
 - `requirements.txt` installs `pyobjc-framework-Quartz` only on macOS for hotkey support

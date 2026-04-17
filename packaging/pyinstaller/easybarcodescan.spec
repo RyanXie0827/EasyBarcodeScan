@@ -23,6 +23,7 @@ if sys.platform == "darwin":
     hidden_imports.append("Quartz")
 else:
     hidden_imports.append("keyboard")
+    hidden_imports += ["pystray", "pystray._win32"]
 
 pyzbar_spec = find_spec("pyzbar")
 if pyzbar_spec and pyzbar_spec.submodule_search_locations:

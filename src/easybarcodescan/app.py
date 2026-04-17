@@ -25,6 +25,14 @@ from .version import APP_VERSION
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageGrab, ImageOps, ImageTk
 from .zbar_compat import prepare_zbar_environment
 
+if platform.system() == "Windows":
+    try:
+        import pystray
+    except Exception:
+        pystray = None
+else:
+    pystray = None
+
 prepare_zbar_environment()
 
 from pyzbar.pyzbar import decode
@@ -121,6 +129,9 @@ OSS_BASE_URL = "https://oss.gds.org.cn"
 IS_PACKAGED_APP = bool(getattr(sys, "frozen", False))
 ENABLE_CONSOLE_DEBUG = not IS_PACKAGED_APP
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+USER_DATA_DIR_NAME = f".{APP_NAME.lower()}"
+LOG_FILE_NAME = f"{APP_NAME.lower()}.log"
+MAX_LOG_FILE_SIZE_BYTES = 2 * 1024 * 1024
 MACOS_SCREEN_CAPTURE_BIN = "/usr/sbin/screencapture"
 MACOS_SETUP_NOTICE = (
     "macOS 首次使用前请先开启系统权限：\n"
@@ -134,7 +145,7 @@ MACOS_SETUP_NOTICE = (
 )
 
 
-def get_app_data_dir() -> Path:
+def get_legacy_platform_app_data_dir() -> Path:
     if platform.system() == "Darwin":
         return Path.home() / "Library" / "Application Support" / APP_NAME
     if platform.system() == "Windows":
@@ -144,32 +155,48 @@ def get_app_data_dir() -> Path:
     return Path.home() / ".config" / APP_NAME
 
 
+def get_app_data_dir() -> Path:
+    return Path.home() / USER_DATA_DIR_NAME
+
+
 def get_config_file_path() -> Path:
-    if IS_PACKAGED_APP:
-        return get_app_data_dir() / "config.json"
-    return PROJECT_ROOT / "config" / "config.json"
+    return get_app_data_dir() / "config.json"
+
+
+def get_log_file_path() -> Path:
+    return get_app_data_dir() / LOG_FILE_NAME
+
+
+def normalize_path_for_compare(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve()
+    except Exception:
+        return path.expanduser()
 
 
 def get_legacy_config_candidates(config_file_path: Path) -> list[Path]:
-    candidates = []
+    candidates = [
+        Path.cwd() / "config.json",
+        Path.cwd() / "config" / "config.json",
+        PROJECT_ROOT / "config" / "config.json",
+        PROJECT_ROOT / "config.json",
+        Path(__file__).resolve().parent / "config.json",
+        get_legacy_platform_app_data_dir() / "config.json",
+    ]
     if IS_PACKAGED_APP:
-        candidates.append(Path.cwd() / "config.json")
         candidates.append(Path(sys.executable).resolve().parent / "config.json")
-        candidates.append(Path.cwd() / "config" / "config.json")
-    else:
-        candidates.append(Path.cwd() / "config.json")
-        candidates.append(Path.cwd() / "config" / "config.json")
-        candidates.append(PROJECT_ROOT / "config.json")
-        candidates.append(Path(__file__).resolve().parent / "config.json")
+
+    target_path = normalize_path_for_compare(config_file_path)
     unique_paths = []
     seen = set()
     for path in candidates:
-        resolved = str(path.resolve())
-        if resolved in seen:
+        normalized_path = normalize_path_for_compare(path)
+        normalized_key = str(normalized_path)
+        if normalized_key in seen:
             continue
-        seen.add(resolved)
-        if path.resolve() != config_file_path.resolve():
-            unique_paths.append(path)
+        seen.add(normalized_key)
+        if normalized_path != target_path:
+            unique_paths.append(normalized_path)
     return unique_paths
 
 
@@ -345,22 +372,37 @@ def get_product_name_text(item_data: dict, default: str = "未知") -> str:
     )
 
 
-def debug_console(message: str, payload=None) -> None:
-    if not ENABLE_CONSOLE_DEBUG:
-        return
+def write_debug_log_line(log_line: str) -> None:
     try:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        if payload is None:
-            print(f"[{APP_NAME} {timestamp}] {message}", flush=True)
-            return
+        log_file_path = get_log_file_path()
+        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_file_path.exists() and log_file_path.stat().st_size >= MAX_LOG_FILE_SIZE_BYTES:
+            backup_path = log_file_path.with_name(f"{log_file_path.name}.1")
+            if backup_path.exists():
+                backup_path.unlink()
+            log_file_path.replace(backup_path)
+        with open(log_file_path, "a", encoding="utf-8") as log_file:
+            log_file.write(log_line + "\n")
+    except Exception:
+        pass
 
-        if isinstance(payload, (dict, list, tuple)):
-            payload_text = json.dumps(payload, ensure_ascii=False, default=str)
+
+def debug_console(message: str, payload=None) -> None:
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if payload is None:
+            log_line = f"[{APP_NAME} {timestamp}] {message}"
         else:
-            payload_text = str(payload)
-        if len(payload_text) > 5000:
-            payload_text = payload_text[:5000] + " ...(truncated)"
-        print(f"[{APP_NAME} {timestamp}] {message} | {payload_text}", flush=True)
+            if isinstance(payload, (dict, list, tuple)):
+                payload_text = json.dumps(payload, ensure_ascii=False, default=str)
+            else:
+                payload_text = str(payload)
+            if len(payload_text) > 5000:
+                payload_text = payload_text[:5000] + " ...(truncated)"
+            log_line = f"[{APP_NAME} {timestamp}] {message} | {payload_text}"
+        write_debug_log_line(log_line)
+        if ENABLE_CONSOLE_DEBUG:
+            print(log_line, flush=True)
     except Exception:
         pass
 
@@ -413,6 +455,10 @@ class BarcodeScannerApp:
 
         self.config_file_path = get_config_file_path()
         self.config = self.load_config()
+        debug_console(
+            "runtime_paths",
+            {"config_file": str(self.config_file_path), "log_file": str(get_log_file_path())},
+        )
         self.current_hotkey = self.get_initial_hotkey()
         self.token = self.config.get("token", "")
         self.remember_password = bool(self.config.get("remember_password", False))
@@ -438,6 +484,9 @@ class BarcodeScannerApp:
         self.pending_login_username = ""
         self.pending_login_password = ""
         self.pending_remember_password = False
+        self.windows_tray_icon = None
+        self.windows_tray_thread = None
+        self.windows_tray_failed = False
 
         self.is_querying = False
         self.scan_session_counter = 0
@@ -932,13 +981,22 @@ class BarcodeScannerApp:
             bg="#ebf2ff",
             fg="#1e3a8a",
         ).pack(anchor="w")
+        subtitle_frame = tk.Frame(title_frame, bg="#ebf2ff")
+        subtitle_frame.pack(anchor="w", pady=(2, 0))
         tk.Label(
-            title_frame,
+            subtitle_frame,
             text="条码扫描工具",
             font=("微软雅黑", 10),
             bg="#ebf2ff",
             fg="#486088",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(side="left")
+        tk.Label(
+            subtitle_frame,
+            text="by Ryan",
+            font=("微软雅黑", 9),
+            bg="#ebf2ff",
+            fg="#94a3b8",
+        ).pack(side="left", padx=(8, 0))
 
         status_card = tk.Frame(main_frame, bg="#ffffff", bd=1, relief="solid")
         status_card.pack(fill="x", pady=(14, 10))
@@ -1009,6 +1067,12 @@ class BarcodeScannerApp:
             ttk.Button(btn_frame, text="历史记录", style="Secondary.TButton", command=self.open_history)
         )
         self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="打开配置目录", style="Secondary.TButton", command=self.open_config_directory)
+        )
+        self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="打开日志文件", style="Secondary.TButton", command=self.open_log_file)
+        )
+        self.home_action_buttons.append(
             ttk.Button(btn_frame, text="清空历史", style="Danger.TButton", command=self.clear_history)
         )
         self.home_action_buttons.append(
@@ -1040,14 +1104,6 @@ class BarcodeScannerApp:
             justify="left",
         )
         self.hide_to_tray_hint_label.pack(anchor="w", pady=(0, 6))
-        tk.Label(
-            main_frame,
-            text="by Ryan",
-            font=("微软雅黑", 8),
-            bg="#ebf2ff",
-            fg="#94a3b8",
-        ).pack(anchor="e", pady=(2, 0))
-
         self.root.bind("<Configure>", self.on_home_resize)
         self.root.after(0, self.on_home_resize)
 
@@ -1065,6 +1121,39 @@ class BarcodeScannerApp:
             return "点叉号只会隐藏到后台，程序仍可全局监听；如需完全退出，请按 Command + Q 或点击“退出程序”。"
         return "点叉号只会隐藏到后台，程序仍可全局监听；如需完全退出，请按 Ctrl + Q 或点击“退出程序”。"
 
+    @staticmethod
+    def open_path_in_system(path: Path) -> None:
+        target = str(path)
+        system_name = platform.system()
+        if system_name == "Windows":
+            os.startfile(target)
+            return
+        if system_name == "Darwin":
+            subprocess.Popen(["open", target])
+            return
+        subprocess.Popen(["xdg-open", target])
+
+    def open_config_directory(self) -> None:
+        config_dir = get_app_data_dir()
+        config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.open_path_in_system(config_dir)
+            debug_console("open_config_directory", {"path": str(config_dir)})
+        except Exception as error:
+            messagebox.showerror("打开失败", f"无法打开配置目录：{error}")
+
+    def open_log_file(self) -> None:
+        log_file = get_log_file_path()
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        if not log_file.exists():
+            with open(log_file, "a", encoding="utf-8"):
+                pass
+        try:
+            self.open_path_in_system(log_file)
+            debug_console("open_log_file", {"path": str(log_file)})
+        except Exception as error:
+            messagebox.showerror("打开失败", f"无法打开日志文件：{error}")
+
     def show_macos_setup_notice(self) -> None:
         if platform.system() != "Darwin":
             return
@@ -1073,19 +1162,102 @@ class BarcodeScannerApp:
     def show_macos_setup_notice_if_needed(self) -> None:
         return
 
+    @staticmethod
+    def create_windows_tray_image() -> Image.Image:
+        icon_size = 64
+        image = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
+        drawer = ImageDraw.Draw(image)
+        drawer.rounded_rectangle((4, 4, icon_size - 4, icon_size - 4), radius=12, fill=(30, 58, 138, 255))
+        bars = [16, 20, 23, 28, 33, 37, 42, 46]
+        for index, x_pos in enumerate(bars):
+            top = 14 if index % 2 == 0 else 16
+            bottom = 52 if index % 3 == 0 else 50
+            drawer.rectangle((x_pos, top, x_pos + 2, bottom), fill=(255, 255, 255, 255))
+        drawer.rectangle((12, 54, 52, 56), fill=(147, 197, 253, 255))
+        return image
+
+    def on_windows_tray_show(self, _icon=None, _item=None) -> None:
+        try:
+            self.root.after(0, self.show_main_window)
+        except Exception:
+            pass
+
+    def on_windows_tray_quit(self, _icon=None, _item=None) -> None:
+        try:
+            self.root.after(0, self.quit_application)
+        except Exception:
+            pass
+
+    def ensure_windows_tray_icon(self) -> bool:
+        if platform.system() != "Windows":
+            return False
+        if self.windows_tray_icon is not None:
+            return True
+        if pystray is None:
+            if not self.windows_tray_failed:
+                self.windows_tray_failed = True
+                debug_console("windows_tray_unavailable", {"reason": "pystray_not_installed"})
+            return False
+        try:
+            tray_menu = pystray.Menu(
+                pystray.MenuItem("显示主窗口", self.on_windows_tray_show, default=True),
+                pystray.MenuItem("退出程序", self.on_windows_tray_quit),
+            )
+            tray_icon = pystray.Icon(
+                APP_NAME.lower(),
+                self.create_windows_tray_image(),
+                APP_NAME,
+                tray_menu,
+            )
+            self.windows_tray_icon = tray_icon
+            self.windows_tray_thread = threading.Thread(
+                target=tray_icon.run,
+                name=f"{APP_NAME}Tray",
+                daemon=True,
+            )
+            self.windows_tray_thread.start()
+            debug_console("windows_tray_started")
+            return True
+        except Exception as error:
+            self.windows_tray_icon = None
+            self.windows_tray_thread = None
+            self.windows_tray_failed = True
+            debug_console("windows_tray_start_failed", {"error": str(error)})
+            return False
+
+    def stop_windows_tray_icon(self) -> None:
+        tray_icon = self.windows_tray_icon
+        self.windows_tray_icon = None
+        self.windows_tray_thread = None
+        if tray_icon is None:
+            return
+        try:
+            tray_icon.stop()
+            debug_console("windows_tray_stopped")
+        except Exception as error:
+            debug_console("windows_tray_stop_failed", {"error": str(error)})
+
     def hide_main_window(self) -> None:
         if self.is_snipping:
             self.last_summary_var.set("最近一次扫描：正在截图中，截图结束后仍会继续后台监听。")
             return
+        tray_ready = False
+        if platform.system() == "Windows":
+            tray_ready = self.ensure_windows_tray_icon()
         try:
             self.root.withdraw()
         except Exception:
             return
         hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()
         if platform.system() == "Windows":
-            self.last_summary_var.set(
-                f"最近一次扫描：主窗口已缩到任务栏通知区域，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
-            )
+            if tray_ready:
+                self.last_summary_var.set(
+                    f"最近一次扫描：主窗口已最小化到系统托盘，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
+                )
+            else:
+                self.last_summary_var.set(
+                    f"最近一次扫描：主窗口已隐藏到后台，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
+                )
         else:
             self.last_summary_var.set(
                 f"最近一次扫描：主窗口已隐藏到后台，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
@@ -2209,7 +2381,12 @@ class BarcodeScannerApp:
                     break
 
                 response = requests.get(candidate_url, timeout=10, impersonate="chrome110")
-                if getattr(response, "status_code", 200) >= 400:
+                status_code = getattr(response, "status_code", 200)
+                debug_console(
+                    "image_request_status",
+                    {"url": candidate_url, "status_code": status_code},
+                )
+                if status_code >= 400:
                     continue
 
                 image_data = bytes(getattr(response, "content", b"") or b"")
@@ -2613,6 +2790,13 @@ class BarcodeScannerApp:
             login_url = "https://passport.gds.org.cn/Account/Login?ReturnUrl=" + urllib.parse.quote(raw_return_url, safe="")
 
             response_page = self.login_session.get(login_url, timeout=10)
+            debug_console(
+                "login_page_status",
+                {"url": login_url, "status_code": getattr(response_page, "status_code", None)},
+            )
+            login_page_status = int(getattr(response_page, "status_code", 0) or 0)
+            if login_page_status < 200 or login_page_status >= 300:
+                raise RuntimeError(f"请求失败，状态码：{login_page_status}（登录页）")
             token_match = re.search(
                 r'name="__RequestVerificationToken"\s+type="hidden"\s+value="([^"]+)"',
                 response_page.text,
@@ -2626,6 +2810,16 @@ class BarcodeScannerApp:
                 headers={"X-Requested-With": "XMLHttpRequest"},
                 timeout=10,
             )
+            debug_console(
+                "captcha_status",
+                {
+                    "url": "https://passport.gds.org.cn/Account/Captcha",
+                    "status_code": getattr(captcha_response, "status_code", None),
+                },
+            )
+            captcha_status = int(getattr(captcha_response, "status_code", 0) or 0)
+            if captcha_status < 200 or captcha_status >= 300:
+                raise RuntimeError(f"请求失败，状态码：{captcha_status}（验证码）")
             cap_data = captcha_response.json()
             self.auth_env["cap_id"] = cap_data["Id"]
             img_base64 = cap_data["Base64"]
@@ -2705,6 +2899,16 @@ class BarcodeScannerApp:
                 headers=headers,
                 timeout=10,
             )
+            debug_console(
+                "account_login_status",
+                {
+                    "url": "https://passport.gds.org.cn/Account/Login",
+                    "status_code": getattr(login_response, "status_code", None),
+                },
+            )
+            account_login_status = int(getattr(login_response, "status_code", 0) or 0)
+            if account_login_status < 200 or account_login_status >= 300:
+                raise RuntimeError(f"请求失败，状态码：{account_login_status}（账号登录）")
             login_result = login_response.json()
             if login_result.get("Code") != 1:
                 raise RuntimeError(login_result.get("Msg", "账号密码或验证码错误"))
@@ -2713,6 +2917,13 @@ class BarcodeScannerApp:
             if home_url.startswith("/"):
                 home_url = "https://passport.gds.org.cn" + home_url
             auth_response = self.login_session.get(home_url, allow_redirects=False, timeout=10)
+            debug_console(
+                "oauth_redirect_status",
+                {"url": home_url, "status_code": getattr(auth_response, "status_code", None)},
+            )
+            redirect_status = int(getattr(auth_response, "status_code", 0) or 0)
+            if redirect_status >= 400:
+                raise RuntimeError(f"请求失败，状态码：{redirect_status}（授权跳转）")
 
             redirect_location = auth_response.headers.get("Location") or auth_response.url
             parsed_url = urllib.parse.urlparse(redirect_location)
@@ -2736,6 +2947,16 @@ class BarcodeScannerApp:
                 data=token_payload,
                 timeout=10,
             )
+            debug_console(
+                "oauth_token_status",
+                {
+                    "url": "https://passport.gds.org.cn/connect/token",
+                    "status_code": getattr(token_response, "status_code", None),
+                },
+            )
+            token_status = int(getattr(token_response, "status_code", 0) or 0)
+            if token_status < 200 or token_status >= 300:
+                raise RuntimeError(f"请求失败，状态码：{token_status}（获取令牌）")
             token_data = token_response.json()
             if "error" in token_data:
                 raise RuntimeError(f"登录失败：{token_data.get('error')}")
@@ -3275,6 +3496,7 @@ class BarcodeScannerApp:
 
     def query_multiple_products(self, search_codes: list[str], session_id: int) -> None:
         error_texts = []
+        request_failures = []
         new_records = []
         success_products = []
         ordered_barcodes: list[str] = []
@@ -3328,12 +3550,12 @@ class BarcodeScannerApp:
                     if status_code in (401, 403):
                         debug_console("接口鉴权失败", {"barcode": barcode, "status_code": status_code})
                         return {"auth_expired": True}
-                    if status_code >= 500:
+                    if status_code < 200 or status_code >= 300:
                         last_error = f"HTTP {status_code}"
-                        if attempt < max_attempts:
+                        if status_code >= 500 and attempt < max_attempts:
                             debug_console("服务端异常重试", {"barcode": barcode, "status_code": status_code, "attempt": attempt})
                             continue
-                        return {"error": last_error}
+                        return {"error": f"请求失败，状态码：{status_code}", "status_code": status_code}
 
                     try:
                         data = response.json()
@@ -3431,6 +3653,9 @@ class BarcodeScannerApp:
                     reason = "查无相关商品信息"
                 else:
                     reason = query_result.get("error") or "请求失败"
+                status_code = query_result.get("status_code")
+                if status_code is not None:
+                    request_failures.append({"barcode": barcode, "status_code": status_code})
                 error_texts.append(f"条码 {barcode}：{reason}")
                 debug_console("条码查询失败", {"barcode": barcode, "reason": reason})
 
@@ -3448,6 +3673,7 @@ class BarcodeScannerApp:
                 error_texts,
                 new_records,
                 success_products,
+                list(request_failures),
                 current_session_id,
             ),
         )
@@ -3457,10 +3683,12 @@ class BarcodeScannerApp:
         error_texts: list[str],
         new_records: list[HistoryRecord],
         success_products: list[dict],
+        request_failures: list[dict] | None = None,
         session_id: int | None = None,
     ) -> None:
         if not self.is_active_scan_session(session_id):
             return
+        request_failures = request_failures or []
         self.is_querying = False
         self.active_scan_session_id = None
         self.query_done = 0
@@ -3470,6 +3698,7 @@ class BarcodeScannerApp:
             {
                 "success_count": len(success_products),
                 "failure_count": len(error_texts),
+                "request_failure_count": len(request_failures),
                 "success_barcodes": [str(item.get("barcode", "")) for item in success_products],
                 "failures": error_texts,
             },
@@ -3492,6 +3721,16 @@ class BarcodeScannerApp:
                 self.last_summary_var.set(f"最近一次扫描：未查询到有效商品信息（失败 {failure_count} 条）")
             else:
                 self.last_summary_var.set("最近一次扫描：未查询到有效商品信息")
+
+        if request_failures:
+            max_lines = 8
+            popup_lines = [
+                f"条码 {item.get('barcode', '-')}：HTTP {item.get('status_code', '-')}" for item in request_failures[:max_lines]
+            ]
+            remain_count = len(request_failures) - len(popup_lines)
+            if remain_count > 0:
+                popup_lines.append(f"……其余 {remain_count} 条请查看日志文件。")
+            messagebox.showerror("请求失败", "以下请求返回了非成功状态码：\n" + "\n".join(popup_lines))
 
     def on_query_partial_success(
         self,
@@ -3522,6 +3761,7 @@ class BarcodeScannerApp:
             self.ensure_preview_window_front()
 
     def quit_application(self) -> None:
+        self.stop_windows_tray_icon()
         try:
             if self.hotkey_handler is not None:
                 remove_hotkey(self.hotkey_handler)

@@ -42,11 +42,15 @@ Output:
 
 ## 5) Config path
 
-When packaged as `.app`, config is stored in:
+Runtime config is stored in:
 
-- `~/Library/Application Support/EasyBarcodeScan/config.json`
+- `~/.easybarcodescan/config.json`
 
-Development config template is:
+Runtime debug/API log is stored in:
+
+- `~/.easybarcodescan/easybarcodescan.log`
+
+Legacy development template is:
 
 - `config/config.example.json`
 
