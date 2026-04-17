@@ -403,8 +403,12 @@ class BarcodeScannerApp:
         self.style = ttk.Style()
         self.setup_styles()
         self.disable_primary_selection_bindings()
-        self.center_window(self.root, 660, 500)
-        min_root_w, min_root_h = self.scale_window_size(self.root, 620, 460)
+        if platform.system() == "Windows":
+            self.center_window(self.root, 760, 560)
+            min_root_w, min_root_h = self.scale_window_size(self.root, 680, 500)
+        else:
+            self.center_window(self.root, 660, 500)
+            min_root_w, min_root_h = self.scale_window_size(self.root, 620, 460)
         self.root.minsize(min_root_w, min_root_h)
 
         self.config_file_path = get_config_file_path()
@@ -444,6 +448,7 @@ class BarcodeScannerApp:
         self.history_window = None
         self.history_tree = None
         self.last_summary_var = tk.StringVar(value="最近一次扫描：暂无")
+        self.last_summary_var.trace_add("write", lambda *_args: self.root.after_idle(self.on_home_resize))
         self.result_window = None
         self.result_products = []
         self.result_index = 0
@@ -916,6 +921,7 @@ class BarcodeScannerApp:
     def build_home_ui(self) -> None:
         main_frame = tk.Frame(self.root, bg="#ebf2ff")
         main_frame.pack(fill="both", expand=True, padx=22, pady=(16, 14))
+        self.home_main_frame = main_frame
 
         title_frame = tk.Frame(main_frame, bg="#ebf2ff")
         title_frame.pack(fill="x")
@@ -936,15 +942,16 @@ class BarcodeScannerApp:
 
         status_card = tk.Frame(main_frame, bg="#ffffff", bd=1, relief="solid")
         status_card.pack(fill="x", pady=(14, 10))
+        self.status_card = status_card
         self.hotkey_label = tk.Label(status_card, font=("微软雅黑", 10), bg="#ffffff", fg="#111827")
-        self.hotkey_label.pack(anchor="w", padx=16, pady=(10, 2))
+        self.hotkey_label.pack(anchor="w", fill="x", padx=16, pady=(10, 2))
         self.token_label = tk.Label(status_card, font=("微软雅黑", 10, "bold"), bg="#ffffff")
-        self.token_label.pack(anchor="w", padx=16, pady=(0, 10))
+        self.token_label.pack(anchor="w", fill="x", padx=16, pady=(0, 10))
 
         if platform.system() == "Darwin":
             macos_card = tk.Frame(main_frame, bg="#fff7ed", bd=1, relief="solid")
             macos_card.pack(fill="x", pady=(0, 10))
-            tk.Label(
+            self.macos_setup_label = tk.Label(
                 macos_card,
                 text="macOS 前置设置：需开启“屏幕录制”和“输入监控”，授权后重启程序。",
                 font=("微软雅黑", 9),
@@ -952,16 +959,20 @@ class BarcodeScannerApp:
                 fg="#9a3412",
                 wraplength=588,
                 justify="left",
-            ).pack(side="left", anchor="w", padx=14, pady=8, expand=True, fill="x")
+            )
+            self.macos_setup_label.pack(side="left", anchor="w", padx=14, pady=8, expand=True, fill="x")
             ttk.Button(
                 macos_card,
                 text="查看说明",
                 style="Secondary.TButton",
                 command=self.show_macos_setup_notice,
             ).pack(side="right", padx=(0, 12), pady=8)
+        else:
+            self.macos_setup_label = None
 
         result_card = tk.Frame(main_frame, bg="#ffffff", bd=1, relief="solid")
         result_card.pack(fill="x")
+        self.result_card = result_card
         tk.Label(
             result_card,
             text="扫描状态",
@@ -978,48 +989,57 @@ class BarcodeScannerApp:
             wraplength=588,
             justify="left",
         )
-        self.summary_label.pack(anchor="w", padx=16, pady=(0, 10))
+        self.summary_label.pack(anchor="w", fill="x", padx=16, pady=(0, 10))
 
         btn_frame = tk.Frame(main_frame, bg="#ebf2ff")
         btn_frame.pack(fill="x", pady=(14, 8))
-        self.auth_btn = ttk.Button(btn_frame, text="登录", style="Primary.TButton", command=self.handle_auth_action)
-        self.auth_btn.grid(
-            row=0, column=0, padx=5, sticky="ew"
-        )
-        ttk.Button(btn_frame, text="开始截图", style="Secondary.TButton", command=self.manual_start_snip).grid(
-            row=0, column=1, padx=5, sticky="ew"
-        )
-        ttk.Button(btn_frame, text="修改快捷键", style="Secondary.TButton", command=self.change_hotkey).grid(
-            row=0, column=2, padx=5, sticky="ew"
-        )
-        ttk.Button(btn_frame, text="历史记录", style="Secondary.TButton", command=self.open_history).grid(
-            row=0, column=3, padx=5, sticky="ew"
-        )
-        ttk.Button(btn_frame, text="清空历史", style="Danger.TButton", command=self.clear_history).grid(
-            row=0, column=4, padx=5, sticky="ew"
-        )
-        ttk.Button(btn_frame, text="退出程序", style="Danger.TButton", command=self.quit_application).grid(
-            row=0, column=5, padx=5, sticky="ew"
-        )
-        for column_index in range(6):
-            btn_frame.grid_columnconfigure(column_index, weight=1)
+        self.home_btn_frame = btn_frame
+        self.home_action_buttons = []
+        self.home_button_columns = None
 
-        tk.Label(
+        self.auth_btn = ttk.Button(btn_frame, text="登录", style="Primary.TButton", command=self.handle_auth_action)
+        self.home_action_buttons.append(self.auth_btn)
+        self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="开始截图", style="Secondary.TButton", command=self.manual_start_snip)
+        )
+        self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="修改快捷键", style="Secondary.TButton", command=self.change_hotkey)
+        )
+        self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="历史记录", style="Secondary.TButton", command=self.open_history)
+        )
+        self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="清空历史", style="Danger.TButton", command=self.clear_history)
+        )
+        self.home_action_buttons.append(
+            ttk.Button(btn_frame, text="退出程序", style="Danger.TButton", command=self.quit_application)
+        )
+        if platform.system() == "Windows":
+            self.relayout_home_buttons()
+        else:
+            for index, button in enumerate(self.home_action_buttons):
+                button.grid(row=0, column=index, padx=5, pady=(0, 6), sticky="ew")
+                self.home_btn_frame.grid_columnconfigure(index, weight=1)
+            self.home_button_columns = len(self.home_action_buttons)
+
+        self.scan_tip_label = tk.Label(
             main_frame,
             text=self.get_scan_tip_text(),
             font=("微软雅黑", 9),
             bg="#ebf2ff",
             fg="#64748b",
-        ).pack(anchor="w", pady=(4, 8))
-        tk.Label(
+        )
+        self.scan_tip_label.pack(anchor="w", pady=(4, 8))
+        self.hide_to_tray_hint_label = tk.Label(
             main_frame,
-            text=f"点叉号只会隐藏到后台，程序仍可全局监听；如需完全退出，请按 {self.get_quit_shortcut_text()} 或点击“退出程序”。",
+            text=self.get_close_action_hint_text(),
             font=("微软雅黑", 9),
             bg="#ebf2ff",
             fg="#64748b",
             wraplength=588,
             justify="left",
-        ).pack(anchor="w", pady=(0, 6))
+        )
+        self.hide_to_tray_hint_label.pack(anchor="w", pady=(0, 6))
         tk.Label(
             main_frame,
             text="by Ryan",
@@ -1029,12 +1049,21 @@ class BarcodeScannerApp:
         ).pack(anchor="e", pady=(2, 0))
 
         self.root.bind("<Configure>", self.on_home_resize)
+        self.root.after(0, self.on_home_resize)
 
     @staticmethod
     def get_scan_tip_text() -> str:
         if platform.system() == "Darwin":
             return "提示：按快捷键后使用 macOS 系统截图框选条码区域，按 ESC 可取消。"
         return "提示：按快捷键框选条码区域，按 ESC 取消截屏。"
+
+    @staticmethod
+    def get_close_action_hint_text() -> str:
+        if platform.system() == "Windows":
+            return "点右上角叉号会缩到任务栏通知区域并继续全局监听；如需完全退出，请按 Ctrl + Q 或点击“退出程序”。"
+        if platform.system() == "Darwin":
+            return "点叉号只会隐藏到后台，程序仍可全局监听；如需完全退出，请按 Command + Q 或点击“退出程序”。"
+        return "点叉号只会隐藏到后台，程序仍可全局监听；如需完全退出，请按 Ctrl + Q 或点击“退出程序”。"
 
     def show_macos_setup_notice(self) -> None:
         if platform.system() != "Darwin":
@@ -1053,9 +1082,14 @@ class BarcodeScannerApp:
         except Exception:
             return
         hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()
-        self.last_summary_var.set(
-            f"最近一次扫描：主窗口已隐藏到后台，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
-        )
+        if platform.system() == "Windows":
+            self.last_summary_var.set(
+                f"最近一次扫描：主窗口已缩到任务栏通知区域，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
+            )
+        else:
+            self.last_summary_var.set(
+                f"最近一次扫描：主窗口已隐藏到后台，仍可按 {hotkey_display} 截图；完全退出请按 {self.get_quit_shortcut_text()}。"
+            )
 
     def show_main_window(self, *_args) -> None:
         try:
@@ -1070,14 +1104,75 @@ class BarcodeScannerApp:
             pass
 
     def on_home_resize(self, _event=None) -> None:
-        if not hasattr(self, "summary_label"):
+        if not hasattr(self, "home_main_frame"):
             return
-        if not (self.summary_label and self.summary_label.winfo_exists()):
+        if not (self.home_main_frame and self.home_main_frame.winfo_exists()):
             return
-        width = self.summary_label.winfo_width()
-        if width <= 40:
+        content_width = self.home_main_frame.winfo_width()
+        if content_width <= 80:
             return
-        self.summary_label.config(wraplength=max(220, width - 6))
+
+        if hasattr(self, "result_card") and self.result_card and self.result_card.winfo_exists():
+            card_width = self.result_card.winfo_width() - 36
+            if card_width > 220:
+                content_width = max(content_width, card_width)
+        wrap_length = max(220, content_width - 10)
+        if hasattr(self, "summary_label") and self.summary_label and self.summary_label.winfo_exists():
+            self.summary_label.config(wraplength=wrap_length)
+        if hasattr(self, "scan_tip_label") and self.scan_tip_label and self.scan_tip_label.winfo_exists():
+            self.scan_tip_label.config(wraplength=wrap_length)
+        if (
+            hasattr(self, "hide_to_tray_hint_label")
+            and self.hide_to_tray_hint_label
+            and self.hide_to_tray_hint_label.winfo_exists()
+        ):
+            self.hide_to_tray_hint_label.config(wraplength=wrap_length)
+        if hasattr(self, "macos_setup_label") and self.macos_setup_label and self.macos_setup_label.winfo_exists():
+            self.macos_setup_label.config(wraplength=max(180, wrap_length - 64))
+
+        if platform.system() == "Windows":
+            self.relayout_home_buttons()
+
+    def relayout_home_buttons(self) -> None:
+        if platform.system() != "Windows":
+            return
+        if not hasattr(self, "home_btn_frame"):
+            return
+        if not (self.home_btn_frame and self.home_btn_frame.winfo_exists()):
+            return
+        buttons = getattr(self, "home_action_buttons", [])
+        if not buttons:
+            return
+
+        frame_width = self.home_btn_frame.winfo_width()
+        if frame_width <= 1:
+            frame_width = max(320, self.root.winfo_width() - 52)
+
+        if frame_width >= 920:
+            columns = 6
+        elif frame_width >= 720:
+            columns = 3
+        elif frame_width >= 500:
+            columns = 2
+        else:
+            columns = 1
+
+        if self.home_button_columns == columns:
+            return
+        self.home_button_columns = columns
+
+        for col in range(6):
+            self.home_btn_frame.grid_columnconfigure(col, weight=0)
+        for col in range(columns):
+            self.home_btn_frame.grid_columnconfigure(col, weight=1, uniform="home_buttons")
+
+        for button in buttons:
+            button.grid_forget()
+
+        for index, button in enumerate(buttons):
+            row = index // columns
+            col = index % columns
+            button.grid(row=row, column=col, padx=5, pady=(0, 6), sticky="ew")
 
     def update_status_labels(self) -> None:
         hotkey_display = self.get_hotkey_display_text(self.current_hotkey) or self.current_hotkey.upper()

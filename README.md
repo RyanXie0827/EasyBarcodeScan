@@ -151,36 +151,71 @@ bash scripts/macos_onekey.sh build
 
 ### 3) Windows 一键运行
 
-PowerShell：
+PowerShell（默认系统 Python）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode run
 ```
 
-或批处理：
+PowerShell（指定系统 Python 路径）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode run -Python "C:\Python311\python.exe"
+```
+
+PowerShell（可选：虚拟环境 `.venv_win`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode run -UseVenvPython
+```
+
+或批处理（默认系统 Python）：
 
 ```bat
 scripts\build_windows.bat run
 ```
 
+批处理（可选：虚拟环境 `.venv_win`）：
+
+```bat
+scripts\build_windows.bat run venv
+```
+
 作用：
 
-- 创建 `.venv_win`
-- 安装依赖
+- 安装依赖（默认使用系统 Python）
 - 启动程序
 
 ### 4) 构建 Windows `.exe`
 
-PowerShell：
+PowerShell（默认系统 Python）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build
 ```
 
-或批处理：
+PowerShell（指定系统 Python 路径）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build -Python "C:\Python311\python.exe"
+```
+
+PowerShell（可选：虚拟环境 `.venv_win`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build -UseVenvPython
+```
+
+或批处理（默认系统 Python）：
 
 ```bat
 scripts\build_windows.bat build
+```
+
+批处理（可选：虚拟环境 `.venv_win`）：
+
+```bat
+scripts\build_windows.bat build venv
 ```
 
 输出：

@@ -10,16 +10,34 @@ python -m pip install -r requirements.txt
 
 ## 2) Windows 打包 EXE
 
-推荐方式：
+推荐方式（默认系统 Python）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build
 ```
 
-或批处理：
+或批处理（默认系统 Python）：
 
 ```bat
 scripts\build_windows.bat build
+```
+
+可选方式（指定系统 Python 路径）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build -Python "C:\Python311\python.exe"
+```
+
+可选方式（虚拟环境 `.venv_win`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Mode build -UseVenvPython
+```
+
+或批处理（虚拟环境 `.venv_win`）：
+
+```bat
+scripts\build_windows.bat build venv
 ```
 
 手动方式：
